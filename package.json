@@ -11,6 +11,7 @@
   "payment": "node ./services/payment-service/server.js",
   "database": "node ./services/database-service/server.js",
   "test:replay": "node scripts/test-replay.js",
+  "test:tamper": "node scripts/test-tamper.js",
   "dev:identity": "nodemon ./identity-service/server.js",
   "test": "echo \"Tests will be added later\""
 },
