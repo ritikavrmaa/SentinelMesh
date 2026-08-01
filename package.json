@@ -15,6 +15,7 @@
   "test:lateral": "node scripts/test-lateral-movement.js",
   "benchmark:latency": "node scripts/benchmark-latency.js",
   "dashboard": "node dashboard/server.js",
+  "live:traffic": "node scripts/live-traffic.js",
   "dev:identity": "nodemon ./identity-service/server.js",
   "test": "echo \"Tests will be added later\""
 },

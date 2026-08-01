@@ -18,15 +18,16 @@ const JWT_SECRET =
   process.env.JWT_SECRET ||
   "sentinelmesh-development-secret-change-later";
 
+// In-memory security stores
 const usedNonces = new Map();
+const revokedTokens = new Map();
 const auditLogs = [];
-
 const publicKeyCache = new Map();
+
 const PUBLIC_KEY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Creates the exact message that the Order Service signed.
- * Both Order Service and Proxy must use the same field order.
+ * Creates the exact message signed by the Order Service.
  */
 function createSigningMessage(request) {
   return [
@@ -40,7 +41,7 @@ function createSigningMessage(request) {
 }
 
 /**
- * Accept requests created within the last 30 seconds.
+ * Allows requests created within the last 30 seconds.
  */
 function validateTimestamp(timestamp) {
   const requestTime = Number(timestamp);
@@ -55,7 +56,7 @@ function validateTimestamp(timestamp) {
 }
 
 /**
- * Detects replay attacks by allowing each nonce only once.
+ * Allows every nonce only once.
  */
 function isNonceUsed(nonce) {
   if (usedNonces.has(nonce)) {
@@ -72,7 +73,7 @@ function isNonceUsed(nonce) {
 }
 
 /**
- * Retrieves and temporarily caches a service public key.
+ * Gets a service public key using a five-minute cache.
  */
 async function getServicePublicKey(serviceId) {
   const cached = publicKeyCache.get(serviceId);
@@ -107,7 +108,7 @@ async function getServicePublicKey(serviceId) {
 }
 
 /**
- * Stores an explainable audit entry.
+ * Adds an explainable audit entry.
  */
 function addAuditLog({
   decision,
@@ -132,17 +133,13 @@ function addAuditLog({
     endpoint: endpoint || "unknown",
     tokenId: tokenId || null,
     statusCode,
-
     publicKeyCacheStatus: publicKeyCacheStatus || null,
-
     verificationLatencyMs: Number(
       verificationLatencyMs.toFixed(3)
     ),
-
     upstreamLatencyMs: Number(
       upstreamLatencyMs.toFixed(3)
     ),
-
     totalLatencyMs: Number(totalLatencyMs.toFixed(3)),
   };
 
@@ -165,7 +162,7 @@ function addAuditLog({
 }
 
 /**
- * Sends the response and records the decision.
+ * Records and sends an ALLOW or DENY response.
  */
 function sendDecision(
   res,
@@ -221,7 +218,7 @@ function sendDecision(
 }
 
 /**
- * Proxy health endpoint.
+ * Proxy health.
  */
 app.get("/health", (req, res) => {
   res.json({
@@ -230,11 +227,12 @@ app.get("/health", (req, res) => {
     status: "healthy",
     auditLogCount: auditLogs.length,
     cachedPublicKeys: publicKeyCache.size,
+    revokedTokenCount: revokedTokens.size,
   });
 });
 
 /**
- * Returns audit logs for the dashboard.
+ * Return audit logs.
  */
 app.get("/audit-logs", (req, res) => {
   const requestedLimit = Number(req.query.limit) || 50;
@@ -249,7 +247,7 @@ app.get("/audit-logs", (req, res) => {
 });
 
 /**
- * Clears all audit logs.
+ * Clear audit logs.
  */
 app.delete("/audit-logs", (req, res) => {
   auditLogs.length = 0;
@@ -261,7 +259,7 @@ app.delete("/audit-logs", (req, res) => {
 });
 
 /**
- * Clears the cached public keys.
+ * Clear public-key cache.
  */
 app.delete("/public-key-cache", (req, res) => {
   publicKeyCache.clear();
@@ -273,7 +271,57 @@ app.delete("/public-key-cache", (req, res) => {
 });
 
 /**
- * Zero-trust payment proxy route.
+ * Revoke a token.
+ */
+app.post("/tokens/revoke", (req, res) => {
+  const { tokenId, reason } = req.body || {};
+
+  if (!tokenId) {
+    return res.status(400).json({
+      success: false,
+      message: "tokenId is required",
+    });
+  }
+
+  revokedTokens.set(tokenId, {
+    tokenId,
+    reason:
+      reason || "Security administrator revoked token",
+    revokedAt: new Date().toISOString(),
+  });
+
+  return res.json({
+    success: true,
+    message: "Token revoked successfully",
+    tokenId,
+  });
+});
+
+/**
+ * Return all revoked tokens.
+ */
+app.get("/tokens/revoked", (req, res) => {
+  return res.json({
+    success: true,
+    count: revokedTokens.size,
+    tokens: Array.from(revokedTokens.values()),
+  });
+});
+
+/**
+ * Clear the revoked-token list.
+ */
+app.delete("/tokens/revoked", (req, res) => {
+  revokedTokens.clear();
+
+  return res.json({
+    success: true,
+    message: "Revoked-token list cleared",
+  });
+});
+
+/**
+ * Zero-trust payment proxy.
  */
 app.post("/proxy/payment", async (req, res) => {
   const startedAt = performance.now();
@@ -293,9 +341,7 @@ app.post("/proxy/payment", async (req, res) => {
       body,
     } = signedRequest;
 
-    /*
-     * Check required fields.
-     */
+    // Required fields
     if (
       !sourceService ||
       !targetService ||
@@ -318,9 +364,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Enforce the HTTP method.
-     */
+    // Method policy
     if (method !== "POST") {
       return sendDecision(res, 403, {
         success: false,
@@ -333,9 +377,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Enforce route policy.
-     */
+    // Route policy
     if (
       targetService !== "payment-service" ||
       endpoint !== "/payments/charge"
@@ -351,9 +393,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Reject expired requests.
-     */
+    // Timestamp validation
     if (!validateTimestamp(timestamp)) {
       return sendDecision(res, 401, {
         success: false,
@@ -366,9 +406,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Reject reused nonces.
-     */
+    // Replay protection
     if (isNonceUsed(nonce)) {
       return sendDecision(res, 409, {
         success: false,
@@ -381,9 +419,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Validate the JWT.
-     */
+    // JWT validation
     let decodedToken;
 
     try {
@@ -402,9 +438,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Ensure the JWT identity matches the claimed source.
-     */
+    // Source identity validation
     if (decodedToken.serviceId !== sourceService) {
       return sendDecision(res, 403, {
         success: false,
@@ -418,9 +452,7 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Ensure the JWT was issued for the correct target.
-     */
+    // Audience validation
     if (decodedToken.audience !== targetService) {
       return sendDecision(res, 403, {
         success: false,
@@ -434,17 +466,29 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Load the service public key from cache or Identity Service.
-     */
-    const {
-      publicKey,
-      cacheStatus,
-    } = await getServicePublicKey(sourceService);
+    // Revocation validation
+    if (revokedTokens.has(decodedToken.tokenId)) {
+      const revocation = revokedTokens.get(
+        decodedToken.tokenId
+      );
 
-    /*
-     * Verify the Ed25519 proof-of-possession signature.
-     */
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: `Token revoked: ${revocation.reason}`,
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId: decodedToken.tokenId,
+        startedAt,
+      });
+    }
+
+    // Public key lookup
+    const { publicKey, cacheStatus } =
+      await getServicePublicKey(sourceService);
+
+    // Ed25519 signature validation
     const signingMessage =
       createSigningMessage(signedRequest);
 
@@ -470,14 +514,9 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Cryptographic and policy verification ends here.
-     */
     const verificationCompletedAt = performance.now();
 
-    /*
-     * Forward the verified request to Payment Service.
-     */
+    // Forward verified request
     const upstreamStartedAt = performance.now();
 
     const paymentResponse = await axios.post(
