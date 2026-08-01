@@ -1,0 +1,36 @@
+{
+  "name": "sentinelmesh",
+  "version": "1.0.0",
+  "description": "Intent-aware Zero-Trust security proxy for microservices",
+  "main": "index.js",
+ "scripts": {
+  "identity": "node ./identity-service/server.js",
+  "proxy": "node ./zero-trust-proxy/server.js",
+  "user": "node ./services/user-service/server.js",
+  "order": "node ./services/order-service/server.js",
+  "payment": "node ./services/payment-service/server.js",
+  "database": "node ./services/database-service/server.js",
+  "dev:identity": "nodemon ./identity-service/server.js",
+  "test": "echo \"Tests will be added later\""
+},
+  "keywords": [
+    "zero-trust",
+    "microservices",
+    "cybersecurity"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.19.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "uuid": "^14.0.1",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4",
+    "nodemon": "^3.1.14"
+  }
+}
