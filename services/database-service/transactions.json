@@ -1,0 +1,11 @@
+[
+  {
+    "transactionId": "132cd4b8-02e2-4de4-9860-259c33b03877",
+    "orderId": "ORD-TEST-1",
+    "amount": 2000,
+    "currency": "INR",
+    "paymentId": null,
+    "paymentStatus": "COMPLETED",
+    "storedAt": "2026-08-01T20:57:04.743Z"
+  }
+]

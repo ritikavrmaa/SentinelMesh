@@ -1,6 +1,5 @@
 const fs = require("fs");
 const path = require("path");
-
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -13,6 +12,7 @@ const app = express();
 const PORT = 4000;
 const IDENTITY_URL = "http://localhost:4001";
 const PAYMENT_URL = "http://localhost:3003";
+const DATABASE_URL = "http://localhost:3004";
 
 const POLICY_FILE = path.join(
   __dirname,
@@ -25,38 +25,32 @@ const JWT_SECRET =
   process.env.JWT_SECRET ||
   "sentinelmesh-development-secret-change-later";
 
+const PUBLIC_KEY_CACHE_TTL_MS = 5 * 60 * 1000;
+
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-// In-memory security stores
 const usedNonces = new Map();
 const revokedTokens = new Map();
 const auditLogs = [];
 const publicKeyCache = new Map();
+const reauthChallenges = new Map();
 
-const PUBLIC_KEY_CACHE_TTL_MS = 5 * 60 * 1000;
-
-/**
- * Loads the latest access policies from the JSON file.
- *
- * The file is read for every request so policy changes can
- * take effect without restarting the proxy.
- */
 function loadPolicies() {
   try {
-    const rawPolicies = fs.readFileSync(POLICY_FILE, "utf8");
-    const parsedPolicies = JSON.parse(rawPolicies);
+    const raw = fs.readFileSync(POLICY_FILE, "utf8");
+    const parsed = JSON.parse(raw);
 
-    if (!Array.isArray(parsedPolicies.routes)) {
+    if (!Array.isArray(parsed.routes)) {
       throw new Error(
         "Policy file must contain a routes array"
       );
     }
 
-    return parsedPolicies.routes;
+    return parsed.routes;
   } catch (error) {
     console.error(
-      "Unable to load access policies:",
+      "Unable to load policies:",
       error.message
     );
 
@@ -64,19 +58,13 @@ function loadPolicies() {
   }
 }
 
-/**
- * Finds the policy matching the request's source, target,
- * HTTP method and endpoint.
- */
 function findMatchingPolicy({
   sourceService,
   targetService,
   method,
   endpoint,
 }) {
-  const policies = loadPolicies();
-
-  return policies.find(
+  return loadPolicies().find(
     (policy) =>
       policy.source === sourceService &&
       policy.target === targetService &&
@@ -85,12 +73,13 @@ function findMatchingPolicy({
       policy.endpoint === endpoint
   );
 }
+
 function evaluatePolicyConstraints(policy, body) {
   if (!policy.constraints) {
     return {
       allowed: true,
       decision: "ALLOW",
-      reason: "No additional policy constraints",
+      reason: "No additional constraints",
     };
   }
 
@@ -103,7 +92,7 @@ function evaluatePolicyConstraints(policy, body) {
   if (
     requireOrderId &&
     (!body.orderId ||
-      String(body.orderId).trim().length === 0)
+      String(body.orderId).trim() === "")
   ) {
     return {
       allowed: false,
@@ -158,9 +147,35 @@ function evaluatePolicyConstraints(policy, body) {
     reason: "Policy constraints verified",
   };
 }
-/**
- * Creates the exact message signed by the source service.
- */
+
+function createReauthChallenge({
+  sourceService,
+  targetService,
+  endpoint,
+  tokenId,
+  body,
+}) {
+  const challengeId = randomUUID();
+
+  const challenge = {
+    challengeId,
+    sourceService,
+    targetService,
+    endpoint,
+    tokenId,
+    requestBody: body,
+    status: "PENDING",
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(
+      Date.now() + 5 * 60 * 1000
+    ).toISOString(),
+  };
+
+  reauthChallenges.set(challengeId, challenge);
+
+  return challenge;
+}
+
 function createSigningMessage(request) {
   return [
     request.method || "POST",
@@ -172,9 +187,6 @@ function createSigningMessage(request) {
   ].join("\n");
 }
 
-/**
- * Allows requests created within the last 30 seconds.
- */
 function validateTimestamp(timestamp) {
   const requestTime = Number(timestamp);
 
@@ -182,14 +194,9 @@ function validateTimestamp(timestamp) {
     return false;
   }
 
-  const difference = Math.abs(Date.now() - requestTime);
-
-  return difference <= 30_000;
+  return Math.abs(Date.now() - requestTime) <= 30_000;
 }
 
-/**
- * Allows every nonce only once.
- */
 function isNonceUsed(nonce) {
   if (usedNonces.has(nonce)) {
     return true;
@@ -204,9 +211,6 @@ function isNonceUsed(nonce) {
   return false;
 }
 
-/**
- * Gets a service public key using a five-minute cache.
- */
 async function getServicePublicKey(serviceId) {
   const cached = publicKeyCache.get(serviceId);
 
@@ -240,9 +244,6 @@ async function getServicePublicKey(serviceId) {
   };
 }
 
-/**
- * Adds an explainable audit entry.
- */
 function addAuditLog({
   decision,
   reason,
@@ -251,28 +252,12 @@ function addAuditLog({
   endpoint,
   tokenId,
   statusCode,
-  verificationLatencyMs,
-  upstreamLatencyMs,
-  totalLatencyMs,
+  verificationLatencyMs = 0,
+  upstreamLatencyMs = 0,
+  totalLatencyMs = 0,
   publicKeyCacheStatus,
   policyTier,
 }) {
-  const safeVerificationLatency = Number.isFinite(
-    verificationLatencyMs
-  )
-    ? verificationLatencyMs
-    : 0;
-
-  const safeUpstreamLatency = Number.isFinite(
-    upstreamLatencyMs
-  )
-    ? upstreamLatencyMs
-    : 0;
-
-  const safeTotalLatency = Number.isFinite(totalLatencyMs)
-    ? totalLatencyMs
-    : 0;
-
   const log = {
     eventId: randomUUID(),
     timestamp: new Date().toISOString(),
@@ -287,13 +272,13 @@ function addAuditLog({
     publicKeyCacheStatus:
       publicKeyCacheStatus || null,
     verificationLatencyMs: Number(
-      safeVerificationLatency.toFixed(3)
+      Number(verificationLatencyMs || 0).toFixed(3)
     ),
     upstreamLatencyMs: Number(
-      safeUpstreamLatency.toFixed(3)
+      Number(upstreamLatencyMs || 0).toFixed(3)
     ),
     totalLatencyMs: Number(
-      safeTotalLatency.toFixed(3)
+      Number(totalLatencyMs || 0).toFixed(3)
     ),
   };
 
@@ -310,15 +295,12 @@ function addAuditLog({
       `verification=${log.verificationLatencyMs}ms | ` +
       `upstream=${log.upstreamLatencyMs}ms | ` +
       `cache=${log.publicKeyCacheStatus || "N/A"} | ` +
-      `${log.reason}`
+      log.reason
   );
 
   return log;
 }
 
-/**
- * Records and sends an ALLOW or DENY response.
- */
 function sendDecision(
   res,
   statusCode,
@@ -378,12 +360,7 @@ function sendDecision(
   });
 }
 
-/**
- * Proxy health.
- */
 app.get("/health", (req, res) => {
-  const policies = loadPolicies();
-
   res.json({
     success: true,
     service: "zero-trust-proxy",
@@ -391,26 +368,21 @@ app.get("/health", (req, res) => {
     auditLogCount: auditLogs.length,
     cachedPublicKeys: publicKeyCache.size,
     revokedTokenCount: revokedTokens.size,
-    loadedPolicyCount: policies.length,
+    reauthChallengeCount: reauthChallenges.size,
+    loadedPolicyCount: loadPolicies().length,
   });
 });
 
-/**
- * Return the currently loaded policies.
- */
 app.get("/policies", (req, res) => {
   const policies = loadPolicies();
 
-  return res.json({
+  res.json({
     success: true,
     count: policies.length,
     policies,
   });
 });
 
-/**
- * Return audit logs.
- */
 app.get("/audit-logs", (req, res) => {
   const requestedLimit = Number(req.query.limit) || 50;
   const limit = Math.min(
@@ -426,9 +398,6 @@ app.get("/audit-logs", (req, res) => {
   });
 });
 
-/**
- * Clear audit logs.
- */
 app.delete("/audit-logs", (req, res) => {
   auditLogs.length = 0;
 
@@ -438,9 +407,6 @@ app.delete("/audit-logs", (req, res) => {
   });
 });
 
-/**
- * Clear public-key cache.
- */
 app.delete("/public-key-cache", (req, res) => {
   publicKeyCache.clear();
 
@@ -450,9 +416,6 @@ app.delete("/public-key-cache", (req, res) => {
   });
 });
 
-/**
- * Revoke a token.
- */
 app.post("/tokens/revoke", (req, res) => {
   const { tokenId, reason } = req.body || {};
 
@@ -478,32 +441,430 @@ app.post("/tokens/revoke", (req, res) => {
   });
 });
 
-/**
- * Return all revoked tokens.
- */
 app.get("/tokens/revoked", (req, res) => {
-  return res.json({
+  res.json({
     success: true,
     count: revokedTokens.size,
     tokens: Array.from(revokedTokens.values()),
   });
 });
 
-/**
- * Clear the revoked-token list.
- */
 app.delete("/tokens/revoked", (req, res) => {
   revokedTokens.clear();
 
-  return res.json({
+  res.json({
     success: true,
     message: "Revoked-token list cleared",
   });
 });
 
-/**
- * Zero-trust payment proxy.
- */
+app.get("/challenges", (req, res) => {
+  const challenges = Array.from(
+    reauthChallenges.values()
+  ).sort(
+    (a, b) =>
+      new Date(b.createdAt) - new Date(a.createdAt)
+  );
+
+  res.json({
+    success: true,
+    count: challenges.length,
+    challenges,
+  });
+});
+
+app.post(
+  "/challenges/:challengeId/approve",
+  async (req, res) => {
+    const { challengeId } = req.params;
+
+    const challenge =
+      reauthChallenges.get(challengeId);
+
+    if (!challenge) {
+      return res.status(404).json({
+        success: false,
+        message: "Challenge not found",
+      });
+    }
+
+    if (challenge.status === "COMPLETED") {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Challenge has already been completed",
+      });
+    }
+
+    if (
+      Date.now() >
+      new Date(challenge.expiresAt).getTime()
+    ) {
+      challenge.status = "EXPIRED";
+      reauthChallenges.set(challengeId, challenge);
+
+      return res.status(410).json({
+        success: false,
+        message: "Challenge has expired",
+        challenge,
+      });
+    }
+
+    try {
+      challenge.status = "APPROVED";
+      challenge.approvedAt =
+        new Date().toISOString();
+
+      reauthChallenges.set(
+        challengeId,
+        challenge
+      );
+
+      const upstreamStartedAt =
+        performance.now();
+
+      const paymentResponse = await axios.post(
+        `${PAYMENT_URL}${challenge.endpoint}`,
+        challenge.requestBody,
+        {
+          timeout: 5000,
+        }
+      );
+
+      const upstreamLatencyMs =
+        performance.now() - upstreamStartedAt;
+
+      challenge.status = "COMPLETED";
+      challenge.completedAt =
+        new Date().toISOString();
+      challenge.paymentResult =
+        paymentResponse.data;
+
+      reauthChallenges.set(
+        challengeId,
+        challenge
+      );
+
+      addAuditLog({
+        decision: "ALLOW",
+        reason:
+          "High-value payment allowed after successful re-authentication",
+        sourceService:
+          challenge.sourceService,
+        targetService:
+          challenge.targetService,
+        endpoint: challenge.endpoint,
+        tokenId: challenge.tokenId,
+        statusCode: 200,
+        verificationLatencyMs: 0,
+        upstreamLatencyMs,
+        totalLatencyMs: upstreamLatencyMs,
+        publicKeyCacheStatus: null,
+        policyTier: "intent-bound",
+      });
+
+      return res.json({
+        success: true,
+        decision: "ALLOW",
+        message:
+          "Re-authentication approved and payment completed",
+        challengeId,
+        challengeStatus: challenge.status,
+        paymentResult: paymentResponse.data,
+        upstreamLatencyMs: Number(
+          upstreamLatencyMs.toFixed(3)
+        ),
+      });
+    } catch (error) {
+      challenge.status = "FAILED";
+      challenge.failureReason =
+        error.response?.data?.message ||
+        error.message;
+
+      reauthChallenges.set(
+        challengeId,
+        challenge
+      );
+
+      return res.status(500).json({
+        success: false,
+        decision: "DENY",
+        message:
+          "Payment failed after challenge approval",
+        error: challenge.failureReason,
+      });
+    }
+  }
+);
+app.post("/proxy/database", async (req, res) => {
+  const startedAt = performance.now();
+
+  let matchedPolicy;
+  let sourceService;
+  let targetService;
+  let endpoint;
+  let tokenId;
+  let cacheStatus;
+
+  try {
+    const signedRequest = req.body || {};
+
+    const {
+      method,
+      timestamp,
+      nonce,
+      accessToken,
+      signature,
+      body,
+    } = signedRequest;
+
+    sourceService = signedRequest.sourceService;
+    targetService = signedRequest.targetService;
+    endpoint = signedRequest.endpoint;
+
+    if (
+      !sourceService ||
+      !targetService ||
+      !method ||
+      !endpoint ||
+      !timestamp ||
+      !nonce ||
+      !accessToken ||
+      !signature ||
+      !body
+    ) {
+      return sendDecision(res, 400, {
+        success: false,
+        decision: "DENY",
+        reason: "Signed request contains missing fields",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+      });
+    }
+
+    matchedPolicy = findMatchingPolicy({
+      sourceService,
+      targetService,
+      method,
+      endpoint,
+    });
+
+    if (!matchedPolicy) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Route policy does not allow this request",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+      });
+    }
+
+    if (!validateTimestamp(timestamp)) {
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: "Request timestamp is expired or invalid",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (isNonceUsed(nonce)) {
+      return sendDecision(res, 409, {
+        success: false,
+        decision: "DENY",
+        reason: "Replay attack detected: nonce already used",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    let decodedToken;
+
+    try {
+      decodedToken = jwt.verify(accessToken, JWT_SECRET, {
+        algorithms: ["HS256"],
+      });
+
+      tokenId = decodedToken.tokenId;
+    } catch (error) {
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: `Invalid access token: ${error.message}`,
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (decodedToken.serviceId !== sourceService) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Token identity does not match source service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (decodedToken.audience !== targetService) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Token audience does not match target service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (revokedTokens.has(tokenId)) {
+      const revocation = revokedTokens.get(tokenId);
+
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: `Token revoked: ${revocation.reason}`,
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    const publicKeyResult =
+      await getServicePublicKey(sourceService);
+
+    const publicKey = publicKeyResult.publicKey;
+    cacheStatus = publicKeyResult.cacheStatus;
+
+    const signingMessage =
+      createSigningMessage(signedRequest);
+
+    const signatureValid = crypto.verify(
+      null,
+      Buffer.from(signingMessage),
+      publicKey,
+      Buffer.from(signature, "base64")
+    );
+
+    if (!signatureValid) {
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: "Cryptographic signature verification failed",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        publicKeyCacheStatus: cacheStatus,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (
+      targetService !== "database-service" ||
+      endpoint !== "/transactions/store"
+    ) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Database proxy target is not allowed",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        publicKeyCacheStatus: cacheStatus,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    const verificationCompletedAt =
+      performance.now();
+
+    const upstreamStartedAt =
+      performance.now();
+
+    const databaseResponse = await axios.post(
+      `${DATABASE_URL}${endpoint}`,
+      body,
+      {
+        timeout: 5000,
+      }
+    );
+
+    const upstreamLatencyMs =
+      performance.now() - upstreamStartedAt;
+
+    return sendDecision(res, 200, {
+      success: true,
+      decision: "ALLOW",
+      reason:
+        "Identity, token, signature and database route policy verified",
+      sourceService,
+      targetService,
+      endpoint,
+      tokenId,
+      startedAt,
+      verificationCompletedAt,
+      upstreamLatencyMs,
+      publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy.tier,
+      extra: {
+        verifiedIdentity: sourceService,
+        targetService,
+        tokenId,
+        databaseResult: databaseResponse.data,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Database proxy error:",
+      error.response?.data || error.message
+    );
+
+    return sendDecision(res, 500, {
+      success: false,
+      decision: "DENY",
+      reason:
+        error.response?.data?.message ||
+        error.message ||
+        "Database proxy verification failed",
+      sourceService,
+      targetService,
+      endpoint,
+      tokenId,
+      startedAt,
+      publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy?.tier,
+    });
+  }
+});
+
 app.post("/proxy/payment", async (req, res) => {
   const startedAt = performance.now();
 
@@ -530,7 +891,6 @@ app.post("/proxy/payment", async (req, res) => {
     targetService = signedRequest.targetService;
     endpoint = signedRequest.endpoint;
 
-    // Required-field validation
     if (
       !sourceService ||
       !targetService ||
@@ -554,12 +914,6 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    /*
-     * Dynamic route-policy validation.
-     *
-     * This replaces the old hard-coded check for:
-     * order-service -> payment-service.
-     */
     matchedPolicy = findMatchingPolicy({
       sourceService,
       targetService,
@@ -580,7 +934,6 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Timestamp validation
     if (!validateTimestamp(timestamp)) {
       return sendDecision(res, 401, {
         success: false,
@@ -595,7 +948,6 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Replay protection
     if (isNonceUsed(nonce)) {
       return sendDecision(res, 409, {
         success: false,
@@ -610,7 +962,6 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // JWT validation
     let decodedToken;
 
     try {
@@ -627,7 +978,8 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
-        reason: `Invalid access token: ${error.message}`,
+        reason:
+          `Invalid access token: ${error.message}`,
         sourceService,
         targetService,
         endpoint,
@@ -636,7 +988,6 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Source identity validation
     if (decodedToken.serviceId !== sourceService) {
       return sendDecision(res, 403, {
         success: false,
@@ -652,7 +1003,6 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Audience validation
     if (decodedToken.audience !== targetService) {
       return sendDecision(res, 403, {
         success: false,
@@ -668,14 +1018,14 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Token-revocation validation
     if (revokedTokens.has(tokenId)) {
       const revocation = revokedTokens.get(tokenId);
 
       return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
-        reason: `Token revoked: ${revocation.reason}`,
+        reason:
+          `Token revoked: ${revocation.reason}`,
         sourceService,
         targetService,
         endpoint,
@@ -685,14 +1035,12 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Public-key lookup
     const publicKeyResult =
       await getServicePublicKey(sourceService);
 
     const publicKey = publicKeyResult.publicKey;
     cacheStatus = publicKeyResult.cacheStatus;
 
-    // Ed25519 signature validation
     const signingMessage =
       createSigningMessage(signedRequest);
 
@@ -718,42 +1066,67 @@ app.post("/proxy/payment", async (req, res) => {
         policyTier: matchedPolicy.tier,
       });
     }
-    const policyEvaluation = evaluatePolicyConstraints(
-  matchedPolicy,
-  body
-);
 
-if (!policyEvaluation.allowed) {
-  return sendDecision(
-    res,
-    policyEvaluation.statusCode,
-    {
-      success: false,
-      decision: policyEvaluation.decision,
-      reason: policyEvaluation.reason,
-      sourceService,
-      targetService,
-      endpoint,
-      tokenId,
-      startedAt,
-      publicKeyCacheStatus: cacheStatus,
-      policyTier: matchedPolicy.tier,
-      extra: {
-        constraints: matchedPolicy.constraints,
-        requestContext: {
-          orderId: body.orderId || null,
-          amount: body.amount || null,
-          currency: body.currency || null,
-        },
-      },
+    const policyEvaluation =
+      evaluatePolicyConstraints(
+        matchedPolicy,
+        body
+      );
+
+    if (!policyEvaluation.allowed) {
+      let challenge = null;
+
+      if (
+        policyEvaluation.decision ===
+        "REAUTH_REQUIRED"
+      ) {
+        challenge = createReauthChallenge({
+          sourceService,
+          targetService,
+          endpoint,
+          tokenId,
+          body,
+        });
+      }
+
+      return sendDecision(
+        res,
+        policyEvaluation.statusCode,
+        {
+          success: false,
+          decision:
+            policyEvaluation.decision,
+          reason: policyEvaluation.reason,
+          sourceService,
+          targetService,
+          endpoint,
+          tokenId,
+          startedAt,
+          publicKeyCacheStatus: cacheStatus,
+          policyTier: matchedPolicy.tier,
+          extra: {
+            challengeId:
+              challenge?.challengeId || null,
+            challengeStatus:
+              challenge?.status || null,
+            challengeExpiresAt:
+              challenge?.expiresAt || null,
+            constraints:
+              matchedPolicy.constraints,
+            requestContext: {
+              orderId: body.orderId || null,
+              amount: body.amount || null,
+              currency:
+                body.currency || null,
+            },
+          },
+        }
+      );
     }
-  );
-}
 
     const verificationCompletedAt =
       performance.now();
 
-    // This route currently forwards only payment requests.
     if (
       targetService !== "payment-service" ||
       endpoint !== "/payments/charge"
@@ -762,7 +1135,7 @@ if (!policyEvaluation.allowed) {
         success: false,
         decision: "DENY",
         reason:
-          "Policy is valid, but this proxy handler does not yet have an upstream adapter for the target service",
+          "Policy is valid, but no upstream adapter exists for this target",
         sourceService,
         targetService,
         endpoint,
@@ -774,8 +1147,8 @@ if (!policyEvaluation.allowed) {
       });
     }
 
-    // Forward the verified request
-    const upstreamStartedAt = performance.now();
+    const upstreamStartedAt =
+      performance.now();
 
     const paymentResponse = await axios.post(
       `${PAYMENT_URL}${endpoint}`,

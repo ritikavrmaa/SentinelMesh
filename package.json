@@ -17,7 +17,8 @@
   "dashboard": "node dashboard/server.js",
   "live:traffic": "node scripts/live-traffic.js",
   "bootstrap": "node scripts/bootstrap-identity.js",
-  "start:all": "concurrently -k -n IDENTITY,PROXY,ORDER,PAYMENT,DASHBOARD -c auto \"npm run identity\" \"npm run proxy\" \"npm run order\" \"npm run payment\" \"npm run dashboard\"",
+  "start:all": "concurrently -k -n IDENTITY,PROXY,ORDER,PAYMENT,DATABASE,DASHBOARD -c auto \"npm run identity\" \"npm run proxy\" \"npm run order\" \"npm run payment\" \"npm run database\" \"npm run dashboard\"",
+  "database": "node services/database-service/server.js",
   "dev:identity": "nodemon ./identity-service/server.js",
   "test": "echo \"Tests will be added later\""
 },

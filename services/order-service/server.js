@@ -6,7 +6,13 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const PORT = 3002;
+const PORT = 3003;
+
+const IDENTITY_SERVICE_URL =
+  "http://localhost:4001";
+
+const ZERO_TRUST_PROXY_URL =
+  "http://localhost:4000";
 
 app.use(cors());
 app.use(express.json());
@@ -18,7 +24,9 @@ const credentialsPath = path.join(
 );
 
 if (!fs.existsSync(credentialsPath)) {
-  console.error("Order Service credentials were not found.");
+  console.error(
+    "Payment Service credentials were not found."
+  );
   console.error(`Expected file: ${credentialsPath}`);
   process.exit(1);
 }
@@ -29,13 +37,13 @@ const identity = JSON.parse(
 
 const SERVICE_ID = identity.serviceId;
 const PRIVATE_KEY = identity.privateKey;
-const IDENTITY_SERVICE_URL = "http://localhost:4001";
 
-let accessToken = null;
-let accessTokenId = null;
+let databaseAccessToken = null;
+let databaseAccessTokenId = null;
 
 /**
- * Creates the same string that the proxy will later verify.
+ * Creates the same canonical string that the
+ * Zero-Trust Proxy verifies.
  */
 function createSigningMessage({
   method,
@@ -45,47 +53,98 @@ function createSigningMessage({
   nonce,
   body,
 }) {
-  const canonicalBody = JSON.stringify(body || {});
-
   return [
-    method.toUpperCase(),
+    String(method || "POST").toUpperCase(),
     targetService,
     endpoint,
     timestamp,
     nonce,
-    canonicalBody,
+    JSON.stringify(body || {}),
   ].join("\n");
 }
 
 /**
- * Signs a request using the Order Service private key.
+ * Signs a request with the Payment Service
+ * Ed25519 private key.
  */
 function signRequest(requestData) {
-  const message = createSigningMessage(requestData);
+  const message =
+    createSigningMessage(requestData);
 
-  return crypto.sign(
-    null,
-    Buffer.from(message),
-    PRIVATE_KEY
-  ).toString("base64");
+  return crypto
+    .sign(
+      null,
+      Buffer.from(message),
+      PRIVATE_KEY
+    )
+    .toString("base64");
 }
 
 /**
- * Gets a short-lived token for calling Payment Service.
+ * Gets a short-lived JWT for calling the
+ * Database Service.
  */
-async function requestAccessToken() {
+async function requestDatabaseAccessToken() {
   const response = await axios.post(
     `${IDENTITY_SERVICE_URL}/token`,
     {
       serviceId: SERVICE_ID,
-      audience: "payment-service",
+      audience: "database-service",
+    },
+    {
+      timeout: 5000,
     }
   );
 
-  accessToken = response.data.token;
-  accessTokenId = response.data.tokenId;
+  databaseAccessToken = response.data.token;
+  databaseAccessTokenId =
+    response.data.tokenId;
 
   return response.data;
+}
+
+/**
+ * Creates a signed Payment -> Database request.
+ */
+async function createDatabaseRequest(payment) {
+  if (!databaseAccessToken) {
+    await requestDatabaseAccessToken();
+  }
+
+  const timestamp = Date.now().toString();
+  const nonce = crypto.randomUUID();
+
+  const transactionBody = {
+    orderId: payment.orderId,
+    amount: payment.amount,
+    currency: payment.currency,
+    paymentId: payment.paymentId,
+    paymentStatus: payment.status,
+  };
+
+  const requestData = {
+    method: "POST",
+    targetService: "database-service",
+    endpoint: "/transactions/store",
+    timestamp,
+    nonce,
+    body: transactionBody,
+  };
+
+  const signature = signRequest(requestData);
+
+  return {
+    sourceService: SERVICE_ID,
+    targetService: "database-service",
+    method: "POST",
+    endpoint: "/transactions/store",
+    body: transactionBody,
+    timestamp,
+    nonce,
+    tokenId: databaseAccessTokenId,
+    accessToken: databaseAccessToken,
+    signature,
+  };
 }
 
 app.get("/health", (req, res) => {
@@ -93,107 +152,144 @@ app.get("/health", (req, res) => {
     success: true,
     service: SERVICE_ID,
     status: "healthy",
-    hasAccessToken: Boolean(accessToken),
+    hasDatabaseAccessToken: Boolean(
+      databaseAccessToken
+    ),
   });
 });
 
 /**
- * Requests a JWT from the Identity Service.
+ * Manually obtains a token for Database Service.
  */
-app.post("/auth/token", async (req, res) => {
-  try {
-    const tokenData = await requestAccessToken();
+app.post(
+  "/auth/database-token",
+  async (req, res) => {
+    try {
+      const tokenData =
+        await requestDatabaseAccessToken();
 
-    res.json({
-      success: true,
-      serviceId: SERVICE_ID,
-      audience: tokenData.audience,
-      tokenId: tokenData.tokenId,
-      expiresIn: tokenData.expiresIn,
-    });
-  } catch (error) {
-    console.error(
-      "Token request failed:",
-      error.response?.data || error.message
-    );
+      return res.json({
+        success: true,
+        serviceId: SERVICE_ID,
+        audience: tokenData.audience,
+        tokenId: tokenData.tokenId,
+        expiresIn: tokenData.expiresIn,
+      });
+    } catch (error) {
+      console.error(
+        "Database token request failed:",
+        error.response?.data || error.message
+      );
 
-    res.status(500).json({
-      success: false,
-      error: "Unable to obtain service token",
-      details: error.response?.data || error.message,
-    });
-  }
-});
-
-/**
- * Creates a signed payment request.
- * Later, this request will go through the Zero-Trust Proxy.
- */
-app.post("/create-payment-request", async (req, res) => {
-  try {
-   const { orderId, amount, currency } = req.body;
-
-    if (!orderId || typeof amount !== "number" || amount <= 0) {
-      return res.status(400).json({
+      return res.status(500).json({
         success: false,
-        error: "Valid orderId and positive numeric amount are required",
+        message:
+          "Unable to obtain database access token",
+        details:
+          error.response?.data || error.message,
       });
     }
-
-    if (!accessToken) {
-      await requestAccessToken();
-    }
-
-    const timestamp = Date.now().toString();
-    const nonce = crypto.randomUUID();
-
-   const paymentBody = {
-  orderId,
-  amount,
-  currency: "INR",
-};
-
-    const requestData = {
-      method: "POST",
-      targetService: "payment-service",
-      endpoint: "/payments/charge",
-      timestamp,
-      nonce,
-      body: paymentBody,
-    };
-
-    const signature = signRequest(requestData);
-
-    res.json({
-      success: true,
-      message: "Signed payment request created",
-      request: {
-        sourceService: SERVICE_ID,
-        targetService: "payment-service",
-        method: "POST",
-        endpoint: "/payments/charge",
-        body: paymentBody,
-        timestamp,
-        nonce,
-        tokenId: accessTokenId,
-        accessToken,
-        signature,
-      },
-    });
-  } catch (error) {
-    console.error(
-      "Payment request creation failed:",
-      error.response?.data || error.message
-    );
-
-    res.status(500).json({
-      success: false,
-      error: "Unable to create signed payment request",
-      details: error.response?.data || error.message,
-    });
   }
-});
+);
+
+/**
+ * Processes the payment and securely stores the
+ * transaction through the Zero-Trust Proxy.
+ */
+app.post(
+  "/payments/charge",
+  async (req, res) => {
+    try {
+      const {
+        orderId,
+        amount,
+        currency = "INR",
+      } = req.body || {};
+
+      if (
+        !orderId ||
+        typeof amount !== "number" ||
+        amount <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "orderId and a positive numeric amount are required",
+        });
+      }
+
+      const payment = {
+        paymentId: `PAY-${Date.now()}`,
+        orderId,
+        amount,
+        currency,
+        status: "COMPLETED",
+        processedBy: SERVICE_ID,
+        processedAt:
+          new Date().toISOString(),
+      };
+
+      const signedDatabaseRequest =
+        await createDatabaseRequest(payment);
+
+      const databaseResponse =
+        await axios.post(
+          `${ZERO_TRUST_PROXY_URL}/proxy/database`,
+          signedDatabaseRequest,
+          {
+            timeout: 5000,
+          }
+        );
+
+      return res.json({
+        success: true,
+        message:
+          "Payment processed and transaction stored securely",
+        payment,
+        databaseStorage: {
+          decision:
+            databaseResponse.data.decision,
+          auditEventId:
+            databaseResponse.data.auditEventId,
+          policyTier:
+            databaseResponse.data.policyTier,
+          result:
+            databaseResponse.data.databaseResult,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Payment processing failed:",
+        error.response?.data || error.message
+      );
+
+      // Remove the cached token if it expired or
+      // became invalid, so the next request gets a new one.
+      if (
+        error.response?.status === 401
+      ) {
+        databaseAccessToken = null;
+        databaseAccessTokenId = null;
+      }
+
+      return res.status(
+        error.response?.status || 500
+      ).json({
+        success: false,
+        message:
+          "Payment or secure transaction storage failed",
+        details:
+          error.response?.data || error.message,
+      });
+    }
+  }
+);
 
 app.listen(PORT, () => {
-  console.log(`Order Service running at http://localhost:${PORT}`);
+  console.log(
+    `Payment Service running at http://localhost:${PORT}`
+  );
+  console.log(
+    `Service identity: ${SERVICE_ID}`
+  );
 });
