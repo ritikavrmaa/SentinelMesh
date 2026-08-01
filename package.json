@@ -13,6 +13,7 @@
   "test:replay": "node scripts/test-replay.js",
   "test:tamper": "node scripts/test-tamper.js",
   "test:lateral": "node scripts/test-lateral-movement.js",
+  "benchmark:latency": "node scripts/benchmark-latency.js",
   "dev:identity": "nodemon ./identity-service/server.js",
   "test": "echo \"Tests will be added later\""
 },
