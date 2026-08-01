@@ -21,9 +21,16 @@ const JWT_SECRET =
 const usedNonces = new Map();
 const auditLogs = [];
 
+const publicKeyCache = new Map();
+const PUBLIC_KEY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Creates the exact message that the Order Service signed.
+ * Both Order Service and Proxy must use the same field order.
+ */
 function createSigningMessage(request) {
   return [
-    "POST",
+    request.method || "POST",
     request.targetService,
     request.endpoint,
     request.timestamp,
@@ -32,6 +39,9 @@ function createSigningMessage(request) {
   ].join("\n");
 }
 
+/**
+ * Accept requests created within the last 30 seconds.
+ */
 function validateTimestamp(timestamp) {
   const requestTime = Number(timestamp);
 
@@ -44,6 +54,9 @@ function validateTimestamp(timestamp) {
   return difference <= 30_000;
 }
 
+/**
+ * Detects replay attacks by allowing each nonce only once.
+ */
 function isNonceUsed(nonce) {
   if (usedNonces.has(nonce)) {
     return true;
@@ -58,6 +71,44 @@ function isNonceUsed(nonce) {
   return false;
 }
 
+/**
+ * Retrieves and temporarily caches a service public key.
+ */
+async function getServicePublicKey(serviceId) {
+  const cached = publicKeyCache.get(serviceId);
+
+  if (
+    cached &&
+    Date.now() - cached.cachedAt < PUBLIC_KEY_CACHE_TTL_MS
+  ) {
+    return {
+      publicKey: cached.publicKey,
+      cacheStatus: "HIT",
+    };
+  }
+
+  const response = await axios.get(
+    `${IDENTITY_URL}/services/${encodeURIComponent(
+      serviceId
+    )}/public-key`
+  );
+
+  const publicKey = response.data.publicKey;
+
+  publicKeyCache.set(serviceId, {
+    publicKey,
+    cachedAt: Date.now(),
+  });
+
+  return {
+    publicKey,
+    cacheStatus: "MISS",
+  };
+}
+
+/**
+ * Stores an explainable audit entry.
+ */
 function addAuditLog({
   decision,
   reason,
@@ -66,7 +117,10 @@ function addAuditLog({
   endpoint,
   tokenId,
   statusCode,
-  startedAt,
+  verificationLatencyMs,
+  upstreamLatencyMs,
+  totalLatencyMs,
+  publicKeyCacheStatus,
 }) {
   const log = {
     eventId: randomUUID(),
@@ -78,26 +132,41 @@ function addAuditLog({
     endpoint: endpoint || "unknown",
     tokenId: tokenId || null,
     statusCode,
+
+    publicKeyCacheStatus: publicKeyCacheStatus || null,
+
     verificationLatencyMs: Number(
-      (performance.now() - startedAt).toFixed(3)
+      verificationLatencyMs.toFixed(3)
     ),
+
+    upstreamLatencyMs: Number(
+      upstreamLatencyMs.toFixed(3)
+    ),
+
+    totalLatencyMs: Number(totalLatencyMs.toFixed(3)),
   };
 
   auditLogs.unshift(log);
 
-  // Prevent unlimited memory usage
   if (auditLogs.length > 500) {
     auditLogs.pop();
   }
 
   console.log(
     `[${log.decision}] ${log.sourceService} -> ` +
-      `${log.targetService}${log.endpoint} | ${log.reason}`
+      `${log.targetService}${log.endpoint} | ` +
+      `verification=${log.verificationLatencyMs}ms | ` +
+      `upstream=${log.upstreamLatencyMs}ms | ` +
+      `cache=${log.publicKeyCacheStatus || "N/A"} | ` +
+      `${log.reason}`
   );
 
   return log;
 }
 
+/**
+ * Sends the response and records the decision.
+ */
 function sendDecision(
   res,
   statusCode,
@@ -110,9 +179,20 @@ function sendDecision(
     endpoint,
     tokenId,
     startedAt,
+    verificationCompletedAt,
+    upstreamLatencyMs = 0,
+    publicKeyCacheStatus,
     extra = {},
   }
 ) {
+  const completedAt = performance.now();
+
+  const verificationLatencyMs = verificationCompletedAt
+    ? verificationCompletedAt - startedAt
+    : completedAt - startedAt;
+
+  const totalLatencyMs = completedAt - startedAt;
+
   const audit = addAuditLog({
     decision,
     reason,
@@ -121,7 +201,10 @@ function sendDecision(
     endpoint,
     tokenId,
     statusCode,
-    startedAt,
+    verificationLatencyMs,
+    upstreamLatencyMs,
+    totalLatencyMs,
+    publicKeyCacheStatus,
   });
 
   return res.status(statusCode).json({
@@ -130,21 +213,32 @@ function sendDecision(
     reason,
     auditEventId: audit.eventId,
     verificationLatencyMs: audit.verificationLatencyMs,
+    upstreamLatencyMs: audit.upstreamLatencyMs,
+    totalLatencyMs: audit.totalLatencyMs,
+    publicKeyCacheStatus: audit.publicKeyCacheStatus,
     ...extra,
   });
 }
 
+/**
+ * Proxy health endpoint.
+ */
 app.get("/health", (req, res) => {
   res.json({
     success: true,
     service: "zero-trust-proxy",
     status: "healthy",
     auditLogCount: auditLogs.length,
+    cachedPublicKeys: publicKeyCache.size,
   });
 });
 
+/**
+ * Returns audit logs for the dashboard.
+ */
 app.get("/audit-logs", (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 50, 500);
+  const requestedLimit = Number(req.query.limit) || 50;
+  const limit = Math.min(Math.max(requestedLimit, 1), 500);
 
   res.json({
     success: true,
@@ -154,6 +248,9 @@ app.get("/audit-logs", (req, res) => {
   });
 });
 
+/**
+ * Clears all audit logs.
+ */
 app.delete("/audit-logs", (req, res) => {
   auditLogs.length = 0;
 
@@ -163,6 +260,21 @@ app.delete("/audit-logs", (req, res) => {
   });
 });
 
+/**
+ * Clears the cached public keys.
+ */
+app.delete("/public-key-cache", (req, res) => {
+  publicKeyCache.clear();
+
+  res.json({
+    success: true,
+    message: "Public-key cache cleared",
+  });
+});
+
+/**
+ * Zero-trust payment proxy route.
+ */
 app.post("/proxy/payment", async (req, res) => {
   const startedAt = performance.now();
 
@@ -172,6 +284,7 @@ app.post("/proxy/payment", async (req, res) => {
     const {
       sourceService,
       targetService,
+      method,
       endpoint,
       timestamp,
       nonce,
@@ -180,9 +293,13 @@ app.post("/proxy/payment", async (req, res) => {
       body,
     } = signedRequest;
 
+    /*
+     * Check required fields.
+     */
     if (
       !sourceService ||
       !targetService ||
+      !method ||
       !endpoint ||
       !timestamp ||
       !nonce ||
@@ -201,6 +318,24 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
+    /*
+     * Enforce the HTTP method.
+     */
+    if (method !== "POST") {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "HTTP method is not allowed by policy",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+      });
+    }
+
+    /*
+     * Enforce route policy.
+     */
     if (
       targetService !== "payment-service" ||
       endpoint !== "/payments/charge"
@@ -216,6 +351,9 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
+    /*
+     * Reject expired requests.
+     */
     if (!validateTimestamp(timestamp)) {
       return sendDecision(res, 401, {
         success: false,
@@ -228,6 +366,9 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
+    /*
+     * Reject reused nonces.
+     */
     if (isNonceUsed(nonce)) {
       return sendDecision(res, 409, {
         success: false,
@@ -240,6 +381,9 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
+    /*
+     * Validate the JWT.
+     */
     let decodedToken;
 
     try {
@@ -258,6 +402,9 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
+    /*
+     * Ensure the JWT identity matches the claimed source.
+     */
     if (decodedToken.serviceId !== sourceService) {
       return sendDecision(res, 403, {
         success: false,
@@ -271,6 +418,9 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
+    /*
+     * Ensure the JWT was issued for the correct target.
+     */
     if (decodedToken.audience !== targetService) {
       return sendDecision(res, 403, {
         success: false,
@@ -284,14 +434,19 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    const publicKeyResponse = await axios.get(
-      `${IDENTITY_URL}/services/${encodeURIComponent(
-        sourceService
-      )}/public-key`
-    );
+    /*
+     * Load the service public key from cache or Identity Service.
+     */
+    const {
+      publicKey,
+      cacheStatus,
+    } = await getServicePublicKey(sourceService);
 
-    const publicKey = publicKeyResponse.data.publicKey;
-    const signingMessage = createSigningMessage(signedRequest);
+    /*
+     * Verify the Ed25519 proof-of-possession signature.
+     */
+    const signingMessage =
+      createSigningMessage(signedRequest);
 
     const signatureValid = crypto.verify(
       null,
@@ -304,19 +459,34 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
-        reason: "Cryptographic signature verification failed",
+        reason:
+          "Cryptographic signature verification failed",
         sourceService,
         targetService,
         endpoint,
         tokenId: decodedToken.tokenId,
         startedAt,
+        publicKeyCacheStatus: cacheStatus,
       });
     }
+
+    /*
+     * Cryptographic and policy verification ends here.
+     */
+    const verificationCompletedAt = performance.now();
+
+    /*
+     * Forward the verified request to Payment Service.
+     */
+    const upstreamStartedAt = performance.now();
 
     const paymentResponse = await axios.post(
       `${PAYMENT_URL}${endpoint}`,
       body
     );
+
+    const upstreamLatencyMs =
+      performance.now() - upstreamStartedAt;
 
     return sendDecision(res, 200, {
       success: true,
@@ -328,6 +498,9 @@ app.post("/proxy/payment", async (req, res) => {
       endpoint,
       tokenId: decodedToken.tokenId,
       startedAt,
+      verificationCompletedAt,
+      upstreamLatencyMs,
+      publicKeyCacheStatus: cacheStatus,
       extra: {
         verifiedIdentity: sourceService,
         targetService,
@@ -357,5 +530,7 @@ app.post("/proxy/payment", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Zero-Trust Proxy running at http://localhost:${PORT}`);
+  console.log(
+    `Zero-Trust Proxy running at http://localhost:${PORT}`
+  );
 });
