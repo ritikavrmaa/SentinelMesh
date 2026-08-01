@@ -16,6 +16,7 @@
   "benchmark:latency": "node scripts/benchmark-latency.js",
   "dashboard": "node dashboard/server.js",
   "live:traffic": "node scripts/live-traffic.js",
+  "bootstrap": "node scripts/bootstrap-identity.js",
   "dev:identity": "nodemon ./identity-service/server.js",
   "test": "echo \"Tests will be added later\""
 },
