@@ -1,3 +1,6 @@
+const fs = require("fs");
+const path = require("path");
+
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -7,16 +10,23 @@ const { randomUUID } = require("crypto");
 
 const app = express();
 
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
-
 const PORT = 4000;
 const IDENTITY_URL = "http://localhost:4001";
 const PAYMENT_URL = "http://localhost:3003";
 
+const POLICY_FILE = path.join(
+  __dirname,
+  "..",
+  "policies",
+  "access-policies.json"
+);
+
 const JWT_SECRET =
   process.env.JWT_SECRET ||
   "sentinelmesh-development-secret-change-later";
+
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
 
 // In-memory security stores
 const usedNonces = new Map();
@@ -27,7 +37,129 @@ const publicKeyCache = new Map();
 const PUBLIC_KEY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Creates the exact message signed by the Order Service.
+ * Loads the latest access policies from the JSON file.
+ *
+ * The file is read for every request so policy changes can
+ * take effect without restarting the proxy.
+ */
+function loadPolicies() {
+  try {
+    const rawPolicies = fs.readFileSync(POLICY_FILE, "utf8");
+    const parsedPolicies = JSON.parse(rawPolicies);
+
+    if (!Array.isArray(parsedPolicies.routes)) {
+      throw new Error(
+        "Policy file must contain a routes array"
+      );
+    }
+
+    return parsedPolicies.routes;
+  } catch (error) {
+    console.error(
+      "Unable to load access policies:",
+      error.message
+    );
+
+    return [];
+  }
+}
+
+/**
+ * Finds the policy matching the request's source, target,
+ * HTTP method and endpoint.
+ */
+function findMatchingPolicy({
+  sourceService,
+  targetService,
+  method,
+  endpoint,
+}) {
+  const policies = loadPolicies();
+
+  return policies.find(
+    (policy) =>
+      policy.source === sourceService &&
+      policy.target === targetService &&
+      String(policy.method || "").toUpperCase() ===
+        String(method || "").toUpperCase() &&
+      policy.endpoint === endpoint
+  );
+}
+function evaluatePolicyConstraints(policy, body) {
+  if (!policy.constraints) {
+    return {
+      allowed: true,
+      decision: "ALLOW",
+      reason: "No additional policy constraints",
+    };
+  }
+
+  const {
+    maxAmount,
+    requireOrderId,
+    allowedCurrency,
+  } = policy.constraints;
+
+  if (
+    requireOrderId &&
+    (!body.orderId ||
+      String(body.orderId).trim().length === 0)
+  ) {
+    return {
+      allowed: false,
+      decision: "DENY",
+      statusCode: 403,
+      reason:
+        "Intent policy denied request: orderId is required",
+    };
+  }
+
+  if (
+    allowedCurrency &&
+    body.currency !== allowedCurrency
+  ) {
+    return {
+      allowed: false,
+      decision: "DENY",
+      statusCode: 403,
+      reason:
+        `Intent policy denied request: currency must be ${allowedCurrency}`,
+    };
+  }
+
+  const amount = Number(body.amount);
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return {
+      allowed: false,
+      decision: "DENY",
+      statusCode: 400,
+      reason:
+        "Intent policy denied request: amount must be a positive number",
+    };
+  }
+
+  if (
+    Number.isFinite(Number(maxAmount)) &&
+    amount > Number(maxAmount)
+  ) {
+    return {
+      allowed: false,
+      decision: "REAUTH_REQUIRED",
+      statusCode: 401,
+      reason:
+        `Dynamic re-authentication required: amount ${amount} exceeds policy limit ${maxAmount}`,
+    };
+  }
+
+  return {
+    allowed: true,
+    decision: "ALLOW",
+    reason: "Policy constraints verified",
+  };
+}
+/**
+ * Creates the exact message signed by the source service.
  */
 function createSigningMessage(request) {
   return [
@@ -80,7 +212,8 @@ async function getServicePublicKey(serviceId) {
 
   if (
     cached &&
-    Date.now() - cached.cachedAt < PUBLIC_KEY_CACHE_TTL_MS
+    Date.now() - cached.cachedAt <
+      PUBLIC_KEY_CACHE_TTL_MS
   ) {
     return {
       publicKey: cached.publicKey,
@@ -122,7 +255,24 @@ function addAuditLog({
   upstreamLatencyMs,
   totalLatencyMs,
   publicKeyCacheStatus,
+  policyTier,
 }) {
+  const safeVerificationLatency = Number.isFinite(
+    verificationLatencyMs
+  )
+    ? verificationLatencyMs
+    : 0;
+
+  const safeUpstreamLatency = Number.isFinite(
+    upstreamLatencyMs
+  )
+    ? upstreamLatencyMs
+    : 0;
+
+  const safeTotalLatency = Number.isFinite(totalLatencyMs)
+    ? totalLatencyMs
+    : 0;
+
   const log = {
     eventId: randomUUID(),
     timestamp: new Date().toISOString(),
@@ -133,14 +283,18 @@ function addAuditLog({
     endpoint: endpoint || "unknown",
     tokenId: tokenId || null,
     statusCode,
-    publicKeyCacheStatus: publicKeyCacheStatus || null,
+    policyTier: policyTier || null,
+    publicKeyCacheStatus:
+      publicKeyCacheStatus || null,
     verificationLatencyMs: Number(
-      verificationLatencyMs.toFixed(3)
+      safeVerificationLatency.toFixed(3)
     ),
     upstreamLatencyMs: Number(
-      upstreamLatencyMs.toFixed(3)
+      safeUpstreamLatency.toFixed(3)
     ),
-    totalLatencyMs: Number(totalLatencyMs.toFixed(3)),
+    totalLatencyMs: Number(
+      safeTotalLatency.toFixed(3)
+    ),
   };
 
   auditLogs.unshift(log);
@@ -152,6 +306,7 @@ function addAuditLog({
   console.log(
     `[${log.decision}] ${log.sourceService} -> ` +
       `${log.targetService}${log.endpoint} | ` +
+      `tier=${log.policyTier || "N/A"} | ` +
       `verification=${log.verificationLatencyMs}ms | ` +
       `upstream=${log.upstreamLatencyMs}ms | ` +
       `cache=${log.publicKeyCacheStatus || "N/A"} | ` +
@@ -179,14 +334,16 @@ function sendDecision(
     verificationCompletedAt,
     upstreamLatencyMs = 0,
     publicKeyCacheStatus,
+    policyTier,
     extra = {},
   }
 ) {
   const completedAt = performance.now();
 
-  const verificationLatencyMs = verificationCompletedAt
-    ? verificationCompletedAt - startedAt
-    : completedAt - startedAt;
+  const verificationLatencyMs =
+    verificationCompletedAt !== undefined
+      ? verificationCompletedAt - startedAt
+      : completedAt - startedAt;
 
   const totalLatencyMs = completedAt - startedAt;
 
@@ -202,6 +359,7 @@ function sendDecision(
     upstreamLatencyMs,
     totalLatencyMs,
     publicKeyCacheStatus,
+    policyTier,
   });
 
   return res.status(statusCode).json({
@@ -209,10 +367,13 @@ function sendDecision(
     decision,
     reason,
     auditEventId: audit.eventId,
-    verificationLatencyMs: audit.verificationLatencyMs,
+    policyTier: audit.policyTier,
+    verificationLatencyMs:
+      audit.verificationLatencyMs,
     upstreamLatencyMs: audit.upstreamLatencyMs,
     totalLatencyMs: audit.totalLatencyMs,
-    publicKeyCacheStatus: audit.publicKeyCacheStatus,
+    publicKeyCacheStatus:
+      audit.publicKeyCacheStatus,
     ...extra,
   });
 }
@@ -221,6 +382,8 @@ function sendDecision(
  * Proxy health.
  */
 app.get("/health", (req, res) => {
+  const policies = loadPolicies();
+
   res.json({
     success: true,
     service: "zero-trust-proxy",
@@ -228,6 +391,20 @@ app.get("/health", (req, res) => {
     auditLogCount: auditLogs.length,
     cachedPublicKeys: publicKeyCache.size,
     revokedTokenCount: revokedTokens.size,
+    loadedPolicyCount: policies.length,
+  });
+});
+
+/**
+ * Return the currently loaded policies.
+ */
+app.get("/policies", (req, res) => {
+  const policies = loadPolicies();
+
+  return res.json({
+    success: true,
+    count: policies.length,
+    policies,
   });
 });
 
@@ -236,7 +413,10 @@ app.get("/health", (req, res) => {
  */
 app.get("/audit-logs", (req, res) => {
   const requestedLimit = Number(req.query.limit) || 50;
-  const limit = Math.min(Math.max(requestedLimit, 1), 500);
+  const limit = Math.min(
+    Math.max(requestedLimit, 1),
+    500
+  );
 
   res.json({
     success: true,
@@ -286,7 +466,8 @@ app.post("/tokens/revoke", (req, res) => {
   revokedTokens.set(tokenId, {
     tokenId,
     reason:
-      reason || "Security administrator revoked token",
+      reason ||
+      "Security administrator revoked token",
     revokedAt: new Date().toISOString(),
   });
 
@@ -326,14 +507,18 @@ app.delete("/tokens/revoked", (req, res) => {
 app.post("/proxy/payment", async (req, res) => {
   const startedAt = performance.now();
 
+  let matchedPolicy;
+  let sourceService;
+  let targetService;
+  let endpoint;
+  let tokenId;
+  let cacheStatus;
+
   try {
     const signedRequest = req.body || {};
 
     const {
-      sourceService,
-      targetService,
       method,
-      endpoint,
       timestamp,
       nonce,
       accessToken,
@@ -341,7 +526,11 @@ app.post("/proxy/payment", async (req, res) => {
       body,
     } = signedRequest;
 
-    // Required fields
+    sourceService = signedRequest.sourceService;
+    targetService = signedRequest.targetService;
+    endpoint = signedRequest.endpoint;
+
+    // Required-field validation
     if (
       !sourceService ||
       !targetService ||
@@ -356,7 +545,8 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 400, {
         success: false,
         decision: "DENY",
-        reason: "Signed request contains missing fields",
+        reason:
+          "Signed request contains missing fields",
         sourceService,
         targetService,
         endpoint,
@@ -364,28 +554,25 @@ app.post("/proxy/payment", async (req, res) => {
       });
     }
 
-    // Method policy
-    if (method !== "POST") {
-      return sendDecision(res, 403, {
-        success: false,
-        decision: "DENY",
-        reason: "HTTP method is not allowed by policy",
-        sourceService,
-        targetService,
-        endpoint,
-        startedAt,
-      });
-    }
+    /*
+     * Dynamic route-policy validation.
+     *
+     * This replaces the old hard-coded check for:
+     * order-service -> payment-service.
+     */
+    matchedPolicy = findMatchingPolicy({
+      sourceService,
+      targetService,
+      method,
+      endpoint,
+    });
 
-    // Route policy
-    if (
-      targetService !== "payment-service" ||
-      endpoint !== "/payments/charge"
-    ) {
+    if (!matchedPolicy) {
       return sendDecision(res, 403, {
         success: false,
         decision: "DENY",
-        reason: "Route policy does not allow this request",
+        reason:
+          "Route policy does not allow this request",
         sourceService,
         targetService,
         endpoint,
@@ -398,11 +585,13 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
-        reason: "Request timestamp is expired or invalid",
+        reason:
+          "Request timestamp is expired or invalid",
         sourceService,
         targetService,
         endpoint,
         startedAt,
+        policyTier: matchedPolicy.tier,
       });
     }
 
@@ -411,11 +600,13 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 409, {
         success: false,
         decision: "DENY",
-        reason: "Replay attack detected: nonce already used",
+        reason:
+          "Replay attack detected: nonce already used",
         sourceService,
         targetService,
         endpoint,
         startedAt,
+        policyTier: matchedPolicy.tier,
       });
     }
 
@@ -423,9 +614,15 @@ app.post("/proxy/payment", async (req, res) => {
     let decodedToken;
 
     try {
-      decodedToken = jwt.verify(accessToken, JWT_SECRET, {
-        algorithms: ["HS256"],
-      });
+      decodedToken = jwt.verify(
+        accessToken,
+        JWT_SECRET,
+        {
+          algorithms: ["HS256"],
+        }
+      );
+
+      tokenId = decodedToken.tokenId;
     } catch (error) {
       return sendDecision(res, 401, {
         success: false,
@@ -435,6 +632,7 @@ app.post("/proxy/payment", async (req, res) => {
         targetService,
         endpoint,
         startedAt,
+        policyTier: matchedPolicy.tier,
       });
     }
 
@@ -443,12 +641,14 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 403, {
         success: false,
         decision: "DENY",
-        reason: "Token identity does not match source service",
+        reason:
+          "Token identity does not match source service",
         sourceService,
         targetService,
         endpoint,
-        tokenId: decodedToken.tokenId,
+        tokenId,
         startedAt,
+        policyTier: matchedPolicy.tier,
       });
     }
 
@@ -457,20 +657,20 @@ app.post("/proxy/payment", async (req, res) => {
       return sendDecision(res, 403, {
         success: false,
         decision: "DENY",
-        reason: "Token audience does not match target service",
+        reason:
+          "Token audience does not match target service",
         sourceService,
         targetService,
         endpoint,
-        tokenId: decodedToken.tokenId,
+        tokenId,
         startedAt,
+        policyTier: matchedPolicy.tier,
       });
     }
 
-    // Revocation validation
-    if (revokedTokens.has(decodedToken.tokenId)) {
-      const revocation = revokedTokens.get(
-        decodedToken.tokenId
-      );
+    // Token-revocation validation
+    if (revokedTokens.has(tokenId)) {
+      const revocation = revokedTokens.get(tokenId);
 
       return sendDecision(res, 401, {
         success: false,
@@ -479,14 +679,18 @@ app.post("/proxy/payment", async (req, res) => {
         sourceService,
         targetService,
         endpoint,
-        tokenId: decodedToken.tokenId,
+        tokenId,
         startedAt,
+        policyTier: matchedPolicy.tier,
       });
     }
 
-    // Public key lookup
-    const { publicKey, cacheStatus } =
+    // Public-key lookup
+    const publicKeyResult =
       await getServicePublicKey(sourceService);
+
+    const publicKey = publicKeyResult.publicKey;
+    cacheStatus = publicKeyResult.cacheStatus;
 
     // Ed25519 signature validation
     const signingMessage =
@@ -508,20 +712,77 @@ app.post("/proxy/payment", async (req, res) => {
         sourceService,
         targetService,
         endpoint,
-        tokenId: decodedToken.tokenId,
+        tokenId,
         startedAt,
         publicKeyCacheStatus: cacheStatus,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+    const policyEvaluation = evaluatePolicyConstraints(
+  matchedPolicy,
+  body
+);
+
+if (!policyEvaluation.allowed) {
+  return sendDecision(
+    res,
+    policyEvaluation.statusCode,
+    {
+      success: false,
+      decision: policyEvaluation.decision,
+      reason: policyEvaluation.reason,
+      sourceService,
+      targetService,
+      endpoint,
+      tokenId,
+      startedAt,
+      publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy.tier,
+      extra: {
+        constraints: matchedPolicy.constraints,
+        requestContext: {
+          orderId: body.orderId || null,
+          amount: body.amount || null,
+          currency: body.currency || null,
+        },
+      },
+    }
+  );
+}
+
+    const verificationCompletedAt =
+      performance.now();
+
+    // This route currently forwards only payment requests.
+    if (
+      targetService !== "payment-service" ||
+      endpoint !== "/payments/charge"
+    ) {
+      return sendDecision(res, 501, {
+        success: false,
+        decision: "DENY",
+        reason:
+          "Policy is valid, but this proxy handler does not yet have an upstream adapter for the target service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        verificationCompletedAt,
+        publicKeyCacheStatus: cacheStatus,
+        policyTier: matchedPolicy.tier,
       });
     }
 
-    const verificationCompletedAt = performance.now();
-
-    // Forward verified request
+    // Forward the verified request
     const upstreamStartedAt = performance.now();
 
     const paymentResponse = await axios.post(
       `${PAYMENT_URL}${endpoint}`,
-      body
+      body,
+      {
+        timeout: 5000,
+      }
     );
 
     const upstreamLatencyMs =
@@ -531,19 +792,27 @@ app.post("/proxy/payment", async (req, res) => {
       success: true,
       decision: "ALLOW",
       reason:
-        "Identity, token, signature and route policy verified",
+        "Identity, token, signature and dynamic route policy verified",
       sourceService,
       targetService,
       endpoint,
-      tokenId: decodedToken.tokenId,
+      tokenId,
       startedAt,
       verificationCompletedAt,
       upstreamLatencyMs,
       publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy.tier,
       extra: {
         verifiedIdentity: sourceService,
         targetService,
-        tokenId: decodedToken.tokenId,
+        tokenId,
+        matchedPolicy: {
+          source: matchedPolicy.source,
+          target: matchedPolicy.target,
+          method: matchedPolicy.method,
+          endpoint: matchedPolicy.endpoint,
+          tier: matchedPolicy.tier,
+        },
         paymentResult: paymentResponse.data,
       },
     });
@@ -560,10 +829,13 @@ app.post("/proxy/payment", async (req, res) => {
         error.response?.data?.message ||
         error.message ||
         "Proxy verification failed",
-      sourceService: req.body?.sourceService,
-      targetService: req.body?.targetService,
-      endpoint: req.body?.endpoint,
+      sourceService,
+      targetService,
+      endpoint,
+      tokenId,
       startedAt,
+      publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy?.tier,
     });
   }
 });
@@ -571,5 +843,9 @@ app.post("/proxy/payment", async (req, res) => {
 app.listen(PORT, () => {
   console.log(
     `Zero-Trust Proxy running at http://localhost:${PORT}`
+  );
+  console.log(`Policy file: ${POLICY_FILE}`);
+  console.log(
+    `Loaded policies: ${loadPolicies().length}`
   );
 });

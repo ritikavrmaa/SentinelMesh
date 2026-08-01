@@ -31,12 +31,29 @@ async function createSignedRequest(orderId) {
     {
       orderId,
       amount: 2000,
+      currency: "INR",
     }
   );
 
-  return response.data.request;
-}
+  const signedRequest =
+    response.data.signedRequest ||
+    response.data.paymentRequest ||
+    response.data.request ||
+    response.data.data;
 
+  if (!signedRequest?.sourceService || !signedRequest?.body) {
+    console.log(
+      "Available response keys:",
+      Object.keys(response.data)
+    );
+
+    throw new Error(
+      "Could not locate the signed request in the Order Service response"
+    );
+  }
+
+  return signedRequest;
+}
 async function sendToProxy(request) {
   try {
     const response = await axios.post(

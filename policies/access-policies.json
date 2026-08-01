@@ -1,0 +1,30 @@
+{
+  "routes": [
+    {
+      "source": "user-service",
+      "target": "order-service",
+      "method": "POST",
+      "endpoint": "/orders/create",
+      "tier": "standard"
+    },
+    {
+      "source": "order-service",
+      "target": "payment-service",
+      "method": "POST",
+      "endpoint": "/payments/charge",
+      "tier": "intent-bound",
+      "constraints": {
+        "maxAmount": 10000,
+        "requireOrderId": true,
+        "allowedCurrency": "INR"
+      }
+    },
+    {
+      "source": "payment-service",
+      "target": "database-service",
+      "method": "POST",
+      "endpoint": "/transactions/store",
+      "tier": "standard"
+    }
+  ]
+}

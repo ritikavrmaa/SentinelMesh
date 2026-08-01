@@ -131,7 +131,7 @@ app.post("/auth/token", async (req, res) => {
  */
 app.post("/create-payment-request", async (req, res) => {
   try {
-    const { orderId, amount } = req.body;
+   const { orderId, amount, currency } = req.body;
 
     if (!orderId || typeof amount !== "number" || amount <= 0) {
       return res.status(400).json({
@@ -147,10 +147,11 @@ app.post("/create-payment-request", async (req, res) => {
     const timestamp = Date.now().toString();
     const nonce = crypto.randomUUID();
 
-    const paymentBody = {
-      orderId,
-      amount,
-    };
+   const paymentBody = {
+  orderId,
+  amount,
+  currency: "INR",
+};
 
     const requestData = {
       method: "POST",
