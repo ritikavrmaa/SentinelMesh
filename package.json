@@ -17,10 +17,12 @@
   "dashboard": "node dashboard/server.js",
   "live:traffic": "node scripts/live-traffic.js",
   "bootstrap": "node scripts/bootstrap-identity.js",
-  "start:all": "concurrently -k -n IDENTITY,PROXY,ORDER,PAYMENT,DATABASE,DASHBOARD -c auto \"npm run identity\" \"npm run proxy\" \"npm run order\" \"npm run payment\" \"npm run database\" \"npm run dashboard\"",
+ "start:all": "concurrently --kill-others-on-fail -n IDENTITY,PROXY,USER,ORDER,PAYMENT,DATABASE,DASHBOARD -c auto \"npm run identity\" \"npm run proxy\" \"npm run user\" \"npm run order\" \"npm run payment\" \"npm run database\" \"npm run dashboard\"",
+ "start:mesh": "concurrently --kill-others-on-fail -n PROXY,USER,ORDER,PAYMENT,DATABASE,DASHBOARD -c auto \"npm run proxy\" \"npm run user\" \"npm run order\" \"npm run payment\" \"npm run database\" \"npm run dashboard\"",
   "user": "node services/user-service/server.js",
   "database": "node services/database-service/server.js",
   "dev:identity": "nodemon ./identity-service/server.js",
+  "test:user-lateral": "node scripts/test-user-database-lateral.js",
   "test": "echo \"Tests will be added later\""
 },
   "keywords": [
