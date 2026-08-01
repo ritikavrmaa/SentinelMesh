@@ -13,6 +13,7 @@ const PORT = 4000;
 const IDENTITY_URL = "http://localhost:4001";
 const PAYMENT_URL = "http://localhost:3003";
 const DATABASE_URL = "http://localhost:3004";
+const ORDER_URL = "http://localhost:3002";
 
 const POLICY_FILE = path.join(
   __dirname,
@@ -864,7 +865,279 @@ app.post("/proxy/database", async (req, res) => {
     });
   }
 });
+app.post("/proxy/order", async (req, res) => {
+  const startedAt = performance.now();
 
+  let matchedPolicy;
+  let sourceService;
+  let targetService;
+  let endpoint;
+  let tokenId;
+  let cacheStatus;
+
+  try {
+    const signedRequest = req.body || {};
+
+    const {
+      method,
+      timestamp,
+      nonce,
+      accessToken,
+      signature,
+      body,
+    } = signedRequest;
+
+    sourceService = signedRequest.sourceService;
+    targetService = signedRequest.targetService;
+    endpoint = signedRequest.endpoint;
+
+    if (
+      !sourceService ||
+      !targetService ||
+      !method ||
+      !endpoint ||
+      !timestamp ||
+      !nonce ||
+      !accessToken ||
+      !signature ||
+      !body
+    ) {
+      return sendDecision(res, 400, {
+        success: false,
+        decision: "DENY",
+        reason: "Signed request contains missing fields",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+      });
+    }
+
+    matchedPolicy = findMatchingPolicy({
+      sourceService,
+      targetService,
+      method,
+      endpoint,
+    });
+
+    if (!matchedPolicy) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Route policy does not allow this request",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+      });
+    }
+
+    if (!validateTimestamp(timestamp)) {
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: "Request timestamp is expired or invalid",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (isNonceUsed(nonce)) {
+      return sendDecision(res, 409, {
+        success: false,
+        decision: "DENY",
+        reason: "Replay attack detected: nonce already used",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    let decodedToken;
+
+    try {
+      decodedToken = jwt.verify(
+        accessToken,
+        JWT_SECRET,
+        {
+          algorithms: ["HS256"],
+        }
+      );
+
+      tokenId = decodedToken.tokenId;
+    } catch (error) {
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: `Invalid access token: ${error.message}`,
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (decodedToken.serviceId !== sourceService) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Token identity does not match source service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (decodedToken.audience !== targetService) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Token audience does not match target service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (revokedTokens.has(tokenId)) {
+      const revocation = revokedTokens.get(tokenId);
+
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason: `Token revoked: ${revocation.reason}`,
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    const publicKeyResult =
+      await getServicePublicKey(sourceService);
+
+    const publicKey = publicKeyResult.publicKey;
+    cacheStatus = publicKeyResult.cacheStatus;
+
+    const signingMessage =
+      createSigningMessage(signedRequest);
+
+    const signatureValid = crypto.verify(
+      null,
+      Buffer.from(signingMessage),
+      publicKey,
+      Buffer.from(signature, "base64")
+    );
+
+    if (!signatureValid) {
+      return sendDecision(res, 401, {
+        success: false,
+        decision: "DENY",
+        reason:
+          "Cryptographic signature verification failed",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        publicKeyCacheStatus: cacheStatus,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    if (
+      targetService !== "order-service" ||
+      endpoint !== "/orders/create"
+    ) {
+      return sendDecision(res, 403, {
+        success: false,
+        decision: "DENY",
+        reason: "Order proxy target is not allowed",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId,
+        startedAt,
+        publicKeyCacheStatus: cacheStatus,
+        policyTier: matchedPolicy.tier,
+      });
+    }
+
+    const verificationCompletedAt =
+      performance.now();
+
+    const upstreamStartedAt =
+      performance.now();
+
+    const orderResponse = await axios.post(
+      `${ORDER_URL}${endpoint}`,
+      body,
+      {
+        timeout: 5000,
+      }
+    );
+
+    const upstreamLatencyMs =
+      performance.now() - upstreamStartedAt;
+
+    return sendDecision(res, 201, {
+      success: true,
+      decision: "ALLOW",
+      reason:
+        "Identity, token, signature and order route policy verified",
+      sourceService,
+      targetService,
+      endpoint,
+      tokenId,
+      startedAt,
+      verificationCompletedAt,
+      upstreamLatencyMs,
+      publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy.tier,
+      extra: {
+        verifiedIdentity: sourceService,
+        targetService,
+        tokenId,
+        orderResult: orderResponse.data,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Order proxy error:",
+      error.response?.data || error.message
+    );
+
+    return sendDecision(res, 500, {
+      success: false,
+      decision: "DENY",
+      reason:
+        error.response?.data?.message ||
+        error.message ||
+        "Order proxy verification failed",
+      sourceService,
+      targetService,
+      endpoint,
+      tokenId,
+      startedAt,
+      publicKeyCacheStatus: cacheStatus,
+      policyTier: matchedPolicy?.tier,
+    });
+  }
+});
 app.post("/proxy/payment", async (req, res) => {
   const startedAt = performance.now();
 
