@@ -21,6 +21,25 @@ const POLICY_FILE = path.join(
   "policies",
   "access-policies.json"
 );
+const DATA_DIRECTORY = path.join(
+  __dirname,
+  "data"
+);
+
+const AUDIT_LOGS_FILE = path.join(
+  DATA_DIRECTORY,
+  "audit-logs.json"
+);
+
+const REVOKED_TOKENS_FILE = path.join(
+  DATA_DIRECTORY,
+  "revoked-tokens.json"
+);
+
+const CHALLENGES_FILE = path.join(
+  DATA_DIRECTORY,
+  "reauth-challenges.json"
+);
 
 const JWT_SECRET =
   process.env.JWT_SECRET ||
@@ -36,6 +55,130 @@ const revokedTokens = new Map();
 const auditLogs = [];
 const publicKeyCache = new Map();
 const reauthChallenges = new Map();
+function ensureDataStorage() {
+  if (!fs.existsSync(DATA_DIRECTORY)) {
+    fs.mkdirSync(DATA_DIRECTORY, {
+      recursive: true,
+    });
+  }
+
+  const files = [
+    AUDIT_LOGS_FILE,
+    REVOKED_TOKENS_FILE,
+    CHALLENGES_FILE,
+  ];
+
+  for (const file of files) {
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(
+        file,
+        JSON.stringify([], null, 2)
+      );
+    }
+  }
+}
+
+function readJsonFile(file) {
+  try {
+    ensureDataStorage();
+
+    const raw = fs.readFileSync(file, "utf8");
+
+    return raw ? JSON.parse(raw) : [];
+  } catch (error) {
+    console.error(
+      `Unable to read ${file}:`,
+      error.message
+    );
+
+    return [];
+  }
+}
+
+function writeJsonFile(file, data) {
+  try {
+    ensureDataStorage();
+
+    const temporaryFile = `${file}.tmp`;
+
+    fs.writeFileSync(
+      temporaryFile,
+      JSON.stringify(data, null, 2)
+    );
+
+    fs.renameSync(temporaryFile, file);
+  } catch (error) {
+    console.error(
+      `Unable to write ${file}:`,
+      error.message
+    );
+  }
+}
+
+function saveAuditLogs() {
+  writeJsonFile(
+    AUDIT_LOGS_FILE,
+    auditLogs
+  );
+}
+
+function saveRevokedTokens() {
+  writeJsonFile(
+    REVOKED_TOKENS_FILE,
+    Array.from(revokedTokens.values())
+  );
+}
+
+function saveChallenges() {
+  writeJsonFile(
+    CHALLENGES_FILE,
+    Array.from(reauthChallenges.values())
+  );
+}
+
+function loadPersistentState() {
+  const storedAuditLogs =
+    readJsonFile(AUDIT_LOGS_FILE);
+
+  const storedRevokedTokens =
+    readJsonFile(REVOKED_TOKENS_FILE);
+
+  const storedChallenges =
+    readJsonFile(CHALLENGES_FILE);
+
+  auditLogs.length = 0;
+  saveAuditLogs();
+  auditLogs.push(...storedAuditLogs);
+
+  revokedTokens.clear();
+
+  for (const token of storedRevokedTokens) {
+    if (token.tokenId) {
+      revokedTokens.set(
+        token.tokenId,
+        token
+      );
+    }
+  }
+
+  reauthChallenges.clear();
+
+  for (const challenge of storedChallenges) {
+    if (challenge.challengeId) {
+      reauthChallenges.set(
+        challenge.challengeId,
+        challenge
+      );
+    }
+  }
+
+  console.log(
+    `Loaded persistent state: ` +
+      `${auditLogs.length} audits, ` +
+      `${revokedTokens.size} revoked tokens, ` +
+      `${reauthChallenges.size} challenges`
+  );
+}
 
 function loadPolicies() {
   try {
@@ -288,6 +431,7 @@ function addAuditLog({
   if (auditLogs.length > 500) {
     auditLogs.pop();
   }
+  saveAuditLogs();
 
   console.log(
     `[${log.decision}] ${log.sourceService} -> ` +
@@ -366,6 +510,7 @@ app.get("/health", (req, res) => {
     success: true,
     service: "zero-trust-proxy",
     status: "healthy",
+    persistence: "enabled",
     auditLogCount: auditLogs.length,
     cachedPublicKeys: publicKeyCache.size,
     revokedTokenCount: revokedTokens.size,
@@ -434,6 +579,7 @@ app.post("/tokens/revoke", (req, res) => {
       "Security administrator revoked token",
     revokedAt: new Date().toISOString(),
   });
+  saveRevokedTokens();
 
   return res.json({
     success: true,
@@ -452,6 +598,7 @@ app.get("/tokens/revoked", (req, res) => {
 
 app.delete("/tokens/revoked", (req, res) => {
   revokedTokens.clear();
+  saveRevokedTokens();
 
   res.json({
     success: true,
@@ -503,7 +650,7 @@ app.post(
     ) {
       challenge.status = "EXPIRED";
       reauthChallenges.set(challengeId, challenge);
-
+saveChallenges();
       return res.status(410).json({
         success: false,
         message: "Challenge has expired",
@@ -1485,7 +1632,7 @@ app.post("/proxy/payment", async (req, res) => {
     });
   }
 });
-
+loadPersistentState();
 app.listen(PORT, () => {
   console.log(
     `Zero-Trust Proxy running at http://localhost:${PORT}`
