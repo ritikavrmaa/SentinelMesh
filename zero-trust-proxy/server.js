@@ -3,6 +3,7 @@ const cors = require("cors");
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { randomUUID } = require("crypto");
 
 const app = express();
 
@@ -18,6 +19,7 @@ const JWT_SECRET =
   "sentinelmesh-development-secret-change-later";
 
 const usedNonces = new Map();
+const auditLogs = [];
 
 function createSigningMessage(request) {
   return [
@@ -56,17 +58,116 @@ function isNonceUsed(nonce) {
   return false;
 }
 
+function addAuditLog({
+  decision,
+  reason,
+  sourceService,
+  targetService,
+  endpoint,
+  tokenId,
+  statusCode,
+  startedAt,
+}) {
+  const log = {
+    eventId: randomUUID(),
+    timestamp: new Date().toISOString(),
+    decision,
+    reason,
+    sourceService: sourceService || "unknown",
+    targetService: targetService || "unknown",
+    endpoint: endpoint || "unknown",
+    tokenId: tokenId || null,
+    statusCode,
+    verificationLatencyMs: Number(
+      (performance.now() - startedAt).toFixed(3)
+    ),
+  };
+
+  auditLogs.unshift(log);
+
+  // Prevent unlimited memory usage
+  if (auditLogs.length > 500) {
+    auditLogs.pop();
+  }
+
+  console.log(
+    `[${log.decision}] ${log.sourceService} -> ` +
+      `${log.targetService}${log.endpoint} | ${log.reason}`
+  );
+
+  return log;
+}
+
+function sendDecision(
+  res,
+  statusCode,
+  {
+    success,
+    decision,
+    reason,
+    sourceService,
+    targetService,
+    endpoint,
+    tokenId,
+    startedAt,
+    extra = {},
+  }
+) {
+  const audit = addAuditLog({
+    decision,
+    reason,
+    sourceService,
+    targetService,
+    endpoint,
+    tokenId,
+    statusCode,
+    startedAt,
+  });
+
+  return res.status(statusCode).json({
+    success,
+    decision,
+    reason,
+    auditEventId: audit.eventId,
+    verificationLatencyMs: audit.verificationLatencyMs,
+    ...extra,
+  });
+}
+
 app.get("/health", (req, res) => {
   res.json({
     success: true,
     service: "zero-trust-proxy",
     status: "healthy",
+    auditLogCount: auditLogs.length,
+  });
+});
+
+app.get("/audit-logs", (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 500);
+
+  res.json({
+    success: true,
+    count: Math.min(auditLogs.length, limit),
+    total: auditLogs.length,
+    logs: auditLogs.slice(0, limit),
+  });
+});
+
+app.delete("/audit-logs", (req, res) => {
+  auditLogs.length = 0;
+
+  res.json({
+    success: true,
+    message: "Audit logs cleared",
   });
 });
 
 app.post("/proxy/payment", async (req, res) => {
+  const startedAt = performance.now();
+
   try {
-    const signedRequest = req.body;
+    const signedRequest = req.body || {};
 
     const {
       sourceService,
@@ -89,37 +190,53 @@ app.post("/proxy/payment", async (req, res) => {
       !signature ||
       !body
     ) {
-      return res.status(400).json({
+      return sendDecision(res, 400, {
         success: false,
         decision: "DENY",
         reason: "Signed request contains missing fields",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
       });
     }
 
     if (
-  targetService !== "payment-service" ||
-  endpoint !== "/payments/charge"
-) {
-      return res.status(403).json({
+      targetService !== "payment-service" ||
+      endpoint !== "/payments/charge"
+    ) {
+      return sendDecision(res, 403, {
         success: false,
         decision: "DENY",
         reason: "Route policy does not allow this request",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
       });
     }
 
     if (!validateTimestamp(timestamp)) {
-      return res.status(401).json({
+      return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
         reason: "Request timestamp is expired or invalid",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
       });
     }
 
     if (isNonceUsed(nonce)) {
-      return res.status(409).json({
+      return sendDecision(res, 409, {
         success: false,
         decision: "DENY",
         reason: "Replay attack detected: nonce already used",
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
       });
     }
 
@@ -130,26 +247,40 @@ app.post("/proxy/payment", async (req, res) => {
         algorithms: ["HS256"],
       });
     } catch (error) {
-      return res.status(401).json({
+      return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
         reason: `Invalid access token: ${error.message}`,
+        sourceService,
+        targetService,
+        endpoint,
+        startedAt,
       });
     }
 
     if (decodedToken.serviceId !== sourceService) {
-      return res.status(403).json({
+      return sendDecision(res, 403, {
         success: false,
         decision: "DENY",
         reason: "Token identity does not match source service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId: decodedToken.tokenId,
+        startedAt,
       });
     }
 
     if (decodedToken.audience !== targetService) {
-      return res.status(403).json({
+      return sendDecision(res, 403, {
         success: false,
         decision: "DENY",
         reason: "Token audience does not match target service",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId: decodedToken.tokenId,
+        startedAt,
       });
     }
 
@@ -160,7 +291,6 @@ app.post("/proxy/payment", async (req, res) => {
     );
 
     const publicKey = publicKeyResponse.data.publicKey;
-
     const signingMessage = createSigningMessage(signedRequest);
 
     const signatureValid = crypto.verify(
@@ -171,10 +301,15 @@ app.post("/proxy/payment", async (req, res) => {
     );
 
     if (!signatureValid) {
-      return res.status(401).json({
+      return sendDecision(res, 401, {
         success: false,
         decision: "DENY",
         reason: "Cryptographic signature verification failed",
+        sourceService,
+        targetService,
+        endpoint,
+        tokenId: decodedToken.tokenId,
+        startedAt,
       });
     }
 
@@ -183,14 +318,22 @@ app.post("/proxy/payment", async (req, res) => {
       body
     );
 
-    return res.json({
+    return sendDecision(res, 200, {
       success: true,
       decision: "ALLOW",
-      reason: "Identity, token, signature and route policy verified",
-      verifiedIdentity: sourceService,
+      reason:
+        "Identity, token, signature and route policy verified",
+      sourceService,
       targetService,
+      endpoint,
       tokenId: decodedToken.tokenId,
-      paymentResult: paymentResponse.data,
+      startedAt,
+      extra: {
+        verifiedIdentity: sourceService,
+        targetService,
+        tokenId: decodedToken.tokenId,
+        paymentResult: paymentResponse.data,
+      },
     });
   } catch (error) {
     console.error(
@@ -198,13 +341,17 @@ app.post("/proxy/payment", async (req, res) => {
       error.response?.data || error.message
     );
 
-    return res.status(500).json({
+    return sendDecision(res, 500, {
       success: false,
       decision: "DENY",
       reason:
         error.response?.data?.message ||
         error.message ||
         "Proxy verification failed",
+      sourceService: req.body?.sourceService,
+      targetService: req.body?.targetService,
+      endpoint: req.body?.endpoint,
+      startedAt,
     });
   }
 });
