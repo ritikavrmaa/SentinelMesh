@@ -6,6 +6,8 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 const PORT = 3001;
 
 const IDENTITY_SERVICE_URL =
@@ -14,8 +16,7 @@ const IDENTITY_SERVICE_URL =
 const ZERO_TRUST_PROXY_URL =
   "http://localhost:4000";
 
-app.use(cors());
-app.use(express.json());
+
 
 const credentialsPath = path.join(
   __dirname,

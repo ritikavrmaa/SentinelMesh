@@ -38,9 +38,6 @@ const identity = JSON.parse(
 const SERVICE_ID = identity.serviceId;
 const PRIVATE_KEY = identity.privateKey;
 
-let databaseAccessToken = null;
-let databaseAccessTokenId = null;
-
 function createSigningMessage({
   method,
   targetService,
@@ -72,7 +69,7 @@ function signRequest(requestData) {
     .toString("base64");
 }
 
-async function requestDatabaseAccessToken() {
+async function requestFreshDatabaseAccessToken() {
   const response = await axios.post(
     `${IDENTITY_SERVICE_URL}/token`,
     {
@@ -84,17 +81,17 @@ async function requestDatabaseAccessToken() {
     }
   );
 
-  databaseAccessToken = response.data.token;
-  databaseAccessTokenId =
-    response.data.tokenId;
-
-  return response.data;
+  return {
+    accessToken: response.data.token,
+    tokenId: response.data.tokenId,
+    audience: response.data.audience,
+    expiresIn: response.data.expiresIn,
+  };
 }
 
 async function createDatabaseRequest(payment) {
-  if (!databaseAccessToken) {
-    await requestDatabaseAccessToken();
-  }
+  const databaseToken =
+    await requestFreshDatabaseAccessToken();
 
   const timestamp = Date.now().toString();
   const nonce = crypto.randomUUID();
@@ -126,8 +123,8 @@ async function createDatabaseRequest(payment) {
     body: transactionBody,
     timestamp,
     nonce,
-    tokenId: databaseAccessTokenId,
-    accessToken: databaseAccessToken,
+    tokenId: databaseToken.tokenId,
+    accessToken: databaseToken.accessToken,
     signature,
   };
 }
@@ -137,9 +134,8 @@ app.get("/health", (req, res) => {
     success: true,
     service: SERVICE_ID,
     status: "healthy",
-    hasDatabaseAccessToken: Boolean(
-      databaseAccessToken
-    ),
+    databaseTokenStrategy:
+      "fresh-token-per-request",
   });
 });
 
@@ -148,7 +144,7 @@ app.post(
   async (req, res) => {
     try {
       const tokenData =
-        await requestDatabaseAccessToken();
+        await requestFreshDatabaseAccessToken();
 
       return res.json({
         success: true,
@@ -241,11 +237,6 @@ app.post(
         error.response?.data || error.message
       );
 
-      if (error.response?.status === 401) {
-        databaseAccessToken = null;
-        databaseAccessTokenId = null;
-      }
-
       return res.status(
         error.response?.status || 500
       ).json({
@@ -264,4 +255,7 @@ app.listen(PORT, () => {
     `Payment Service running at http://localhost:${PORT}`
   );
   console.log(`Service identity: ${SERVICE_ID}`);
+  console.log(
+    "Database token strategy: fresh token per request"
+  );
 });

@@ -1,1 +1,64 @@
-[]
+[
+  {
+    "challengeId": "4ebfc8d4-3834-4f78-8b02-dc1894fdf859",
+    "sourceService": "order-service",
+    "targetService": "payment-service",
+    "endpoint": "/payments/charge",
+    "tokenId": "71ae969f-eb68-43ab-8ac6-f949eb53d41e",
+    "requestBody": {
+      "orderId": "ORD-DASH-1785623682423",
+      "amount": 15000,
+      "currency": "INR"
+    },
+    "status": "EXPIRED",
+    "createdAt": "2026-08-01T22:34:42.444Z",
+    "expiresAt": "2026-08-01T22:39:42.444Z"
+  },
+  {
+    "challengeId": "def16c93-1e6b-4399-91ec-1d715dda00a2",
+    "sourceService": "order-service",
+    "targetService": "payment-service",
+    "endpoint": "/payments/charge",
+    "tokenId": "8a7cc7ca-88a7-462e-af6a-22fdec0ed60a",
+    "requestBody": {
+      "orderId": "ORD-DASH-1785623684136",
+      "amount": 15000,
+      "currency": "INR"
+    },
+    "status": "EXPIRED",
+    "createdAt": "2026-08-01T22:34:44.205Z",
+    "expiresAt": "2026-08-01T22:39:44.205Z"
+  },
+  {
+    "challengeId": "306f30ed-f17e-44ea-9b2e-8eace20b686f",
+    "sourceService": "order-service",
+    "targetService": "payment-service",
+    "endpoint": "/payments/charge",
+    "tokenId": "20afbe26-d843-4bf3-ab69-62f4f4fae938",
+    "requestBody": {
+      "orderId": "ORD-DASH-1785623919459",
+      "amount": 15000,
+      "currency": "INR"
+    },
+    "status": "EXPIRED",
+    "createdAt": "2026-08-01T22:38:39.481Z",
+    "expiresAt": "2026-08-01T22:43:39.481Z"
+  },
+  {
+    "challengeId": "3e635770-da47-4a07-b309-642b966f445c",
+    "sourceService": "order-service",
+    "targetService": "payment-service",
+    "endpoint": "/payments/charge",
+    "tokenId": "7124dc0e-ec8a-4f0a-807e-5eb4cba5d21f",
+    "requestBody": {
+      "orderId": "ORD-DASH-1785625183628",
+      "amount": 15000,
+      "currency": "INR"
+    },
+    "status": "FAILED",
+    "createdAt": "2026-08-01T22:59:43.688Z",
+    "expiresAt": "2026-08-01T23:04:43.688Z",
+    "approvedAt": "2026-08-01T22:59:48.449Z",
+    "failureReason": "Payment or secure transaction storage failed"
+  }
+]
