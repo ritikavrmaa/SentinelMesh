@@ -2,7 +2,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
-
+const cors = require("cors");
 const app = express();
 const PORT = 3004;
 
@@ -11,6 +11,7 @@ const DATA_FILE = path.join(
   "transactions.json"
 );
 
+app.use(cors());
 app.use(express.json());
 
 function readTransactions() {
