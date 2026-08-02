@@ -15,7 +15,8 @@
     "live:traffic": "node scripts/live-traffic.js",
     "test:user-lateral": "node scripts/test-user-database-lateral.js",
     "test:security": "node scripts/test-security.js",
-    "start:all": "scripts\\start-all.cmd"
+    "start:all": "scripts\\start-all.cmd",
+    "start:cloud-backend": "node scripts/start-cloud-backend.js"
   },
   "keywords": [
     "zero-trust",
