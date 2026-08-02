@@ -1,12 +1,5 @@
 [
   {
-    "serviceId": "user-service",
-    "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA07fjwkn4bUtverHstLewT4yxkzDu67LSK7yHt7DxDio=\n-----END PUBLIC KEY-----\n",
-    "registeredAt": "2026-08-01T21:47:04.632Z",
-    "updatedAt": "2026-08-01T21:47:04.634Z",
-    "active": true
-  },
-  {
     "serviceId": "order-service",
     "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAoV9E4MQuHDH6USMYXRcIFMGF3YqpfVeDusuW9Bh8Ptk=\n-----END PUBLIC KEY-----\n",
     "registeredAt": "2026-08-01T21:47:04.669Z",
