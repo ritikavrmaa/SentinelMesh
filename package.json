@@ -3,28 +3,19 @@
   "version": "1.0.0",
   "description": "Intent-aware Zero-Trust security proxy for microservices",
   "main": "index.js",
- "scripts": {
-  "identity": "node ./identity-service/server.js",
-  "proxy": "node ./zero-trust-proxy/server.js",
-  
-  "order": "node ./services/order-service/server.js",
-  "payment": "node ./services/payment-service/server.js",
- 
-  "test:replay": "node scripts/test-replay.js",
-  "test:tamper": "node scripts/test-tamper.js",
-  "test:lateral": "node scripts/test-lateral-movement.js",
-  "benchmark:latency": "node scripts/benchmark-latency.js",
-  "dashboard": "node dashboard/server.js",
-  "live:traffic": "node scripts/live-traffic.js",
-  "bootstrap": "node scripts/bootstrap-identity.js",
- "start:all": "concurrently --kill-others-on-fail -n IDENTITY,PROXY,USER,ORDER,PAYMENT,DATABASE,DASHBOARD -c auto \"npm run identity\" \"npm run proxy\" \"npm run user\" \"npm run order\" \"npm run payment\" \"npm run database\" \"npm run dashboard\"",
- "start:mesh": "concurrently --kill-others-on-fail -n PROXY,USER,ORDER,PAYMENT,DATABASE,DASHBOARD -c auto \"npm run proxy\" \"npm run user\" \"npm run order\" \"npm run payment\" \"npm run database\" \"npm run dashboard\"",
+"scripts": {
+  "identity": "node identity-service/server.js",
+  "proxy": "node zero-trust-proxy/server.js",
   "user": "node services/user-service/server.js",
-  "test:security": "node scripts/test-security.js",
+  "order": "node services/order-service/server.js",
+  "payment": "node services/payment-service/server.js",
   "database": "node services/database-service/server.js",
-  "dev:identity": "nodemon ./identity-service/server.js",
+  "dashboard": "node dashboard/server.js",
+  "bootstrap": "node scripts/bootstrap-identities.js",
+  "live:traffic": "node scripts/live-traffic.js",
   "test:user-lateral": "node scripts/test-user-database-lateral.js",
-  "test": "echo \"Tests will be added later\""
+  "test:security": "node scripts/test-security.js",
+ "start:all": "scripts\\start-all.cmd"
 },
   "keywords": [
     "zero-trust",
