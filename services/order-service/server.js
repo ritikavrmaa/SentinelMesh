@@ -31,7 +31,11 @@ const SERVICE_ID = identity.serviceId;
 const PRIVATE_KEY = identity.privateKey;
 
 const IDENTITY_SERVICE_URL =
+  process.env.IDENTITY_SERVICE_URL ||
   "http://localhost:4001";
+ const ZERO_TRUST_PROXY_URL =
+  process.env.ZERO_TRUST_PROXY_URL ||
+  "http://localhost:4000"; 
 
 let accessToken = null;
 let accessTokenId = null;

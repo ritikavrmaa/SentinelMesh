@@ -10,10 +10,21 @@ const { randomUUID } = require("crypto");
 const app = express();
 
 const PORT = 4000;
-const IDENTITY_URL = "http://localhost:4001";
-const PAYMENT_URL = "http://localhost:3003";
-const DATABASE_URL = "http://localhost:3004";
-const ORDER_URL = "http://localhost:3002";
+const IDENTITY_URL =
+  process.env.IDENTITY_URL ||
+  "http://localhost:4001";
+
+const PAYMENT_URL =
+  process.env.PAYMENT_URL ||
+  "http://localhost:3003";
+
+const DATABASE_URL =
+  process.env.DATABASE_URL ||
+  "http://localhost:3004";
+
+const ORDER_URL =
+  process.env.ORDER_URL ||
+  "http://localhost:3002";
 
 const POLICY_FILE = path.join(
   __dirname,

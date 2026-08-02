@@ -9,9 +9,11 @@ const app = express();
 const PORT = 3003;
 
 const IDENTITY_SERVICE_URL =
+  process.env.IDENTITY_SERVICE_URL ||
   "http://localhost:4001";
 
 const ZERO_TRUST_PROXY_URL =
+  process.env.ZERO_TRUST_PROXY_URL ||
   "http://localhost:4000";
 
 app.use(cors());

@@ -1,0 +1,94 @@
+services:
+  identity-service:
+    build: .
+    command: node identity-service/server.js
+    environment:
+      JWT_SECRET: sentinelmesh-development-secret-change-later
+    ports:
+      - "4001:4001"
+    volumes:
+      - ./identity-service/data:/app/identity-service/data
+      - ./services/user-service/credentials:/app/services/user-service/credentials
+      - ./services/order-service/credentials:/app/services/order-service/credentials
+      - ./services/payment-service/credentials:/app/services/payment-service/credentials
+
+  zero-trust-proxy:
+    build: .
+    command: node zero-trust-proxy/server.js
+    depends_on:
+      - identity-service
+     
+      - database-service
+    environment:
+      JWT_SECRET: sentinelmesh-development-secret-change-later
+      IDENTITY_URL: http://identity-service:4001
+      ORDER_URL: http://order-service:3002
+      PAYMENT_URL: http://payment-service:3003
+      DATABASE_URL: http://database-service:3004
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./zero-trust-proxy/data:/app/zero-trust-proxy/data
+      - ./policies:/app/policies
+
+  user-service:
+    build: .
+    command: node services/user-service/server.js
+    depends_on:
+      - identity-service
+      
+    environment:
+      IDENTITY_SERVICE_URL: http://identity-service:4001
+      ZERO_TRUST_PROXY_URL: http://zero-trust-proxy:4000
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./services/user-service/credentials:/app/services/user-service/credentials
+
+  order-service:
+    build: .
+    command: node services/order-service/server.js
+    depends_on:
+      - identity-service
+      
+    environment:
+      IDENTITY_SERVICE_URL: http://identity-service:4001
+      ZERO_TRUST_PROXY_URL: http://zero-trust-proxy:4000
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./services/order-service/credentials:/app/services/order-service/credentials
+
+  payment-service:
+    build: .
+    command: node services/payment-service/server.js
+    depends_on:
+      - identity-service
+      
+    environment:
+      IDENTITY_SERVICE_URL: http://identity-service:4001
+      ZERO_TRUST_PROXY_URL: http://zero-trust-proxy:4000
+    ports:
+      - "3003:3003"
+    volumes:
+      - ./services/payment-service/credentials:/app/services/payment-service/credentials
+
+  database-service:
+    build: .
+    command: node services/database-service/server.js
+    ports:
+      - "3004:3004"
+    volumes:
+      - ./services/database-service:/app/services/database-service
+
+  dashboard:
+    build: .
+    command: node dashboard/server.js
+    depends_on:
+      - zero-trust-proxy
+      - user-service
+      - order-service
+      - payment-service
+      - database-service
+    ports:
+      - "5173:5173"
