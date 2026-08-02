@@ -641,6 +641,54 @@
       font-size: 11px;
     }
 
+
+    .ai-panel {
+      margin-top: 18px;
+      border-radius: 18px;
+      overflow: hidden;
+    }
+
+    .ai-content {
+      padding: 18px 20px;
+    }
+
+    .ai-placeholder {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .ai-analysis {
+      min-height: 140px;
+      padding: 16px;
+      border-radius: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #dbeafe;
+      background: rgba(4, 12, 25, 0.78);
+      border: 1px solid rgba(34, 211, 238, 0.2);
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .ai-loading {
+      color: var(--cyan);
+    }
+
+    .ai-error {
+      color: #ffc2cf;
+    }
+
+    .button.ai {
+      padding: 7px 10px;
+      color: #c4b5fd;
+      border-color: rgba(168, 85, 247, 0.35);
+      background: rgba(168, 85, 247, 0.1);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
     .footer {
       margin-top: 20px;
       color: #53637c;
@@ -1064,6 +1112,7 @@ td {
               <th>Upstream</th>
               <th>Cache</th>
               <th>Time</th>
+              <th>AI Analysis</th>
             </tr>
           </thead>
 
@@ -1073,6 +1122,22 @@ td {
         <div class="empty" id="auditEmpty">
           No audit events yet. Run a demonstration above.
         </div>
+      </div>
+    </section>
+
+
+    <section class="panel glass ai-panel">
+      <div class="panel-header">
+        <div>
+          <h3>Lyzr AI Security Analyst</h3>
+          <p>Explain any Zero-Trust audit event using the deployed Lyzr agent</p>
+        </div>
+
+        <span class="live" id="aiStatus">Ready</span>
+      </div>
+
+      <div class="ai-content">
+        <div class="ai-analysis" id="aiAnalysis">Select “Analyze” beside an audit event to generate an AI security report.</div>
       </div>
     </section>
 
@@ -1087,6 +1152,8 @@ td {
     const USER_URL = "http://localhost:3001";
     const ORDER_URL = "http://localhost:3002";
     const DATABASE_URL = "http://localhost:3004";
+
+    let latestAuditLogs = [];
 
     function setError(message) {
       const banner = document.getElementById("errorBanner");
@@ -1612,6 +1679,7 @@ td {
     }
 
     function renderAuditLogs(logs) {
+      latestAuditLogs = logs;
       const body =
         document.getElementById("auditBody");
 
@@ -1627,7 +1695,7 @@ td {
 
       empty.style.display = "none";
 
-      logs.forEach((log) => {
+      logs.forEach((log, index) => {
         const row = document.createElement("tr");
 
         const decisionClass =
@@ -1669,10 +1737,79 @@ td {
               log.timestamp
             ).toLocaleTimeString()}
           </td>
+
+          <td>
+            <button
+              class="button ai"
+              onclick="analyzeAudit(${index}, this)"
+            >
+              Analyze
+            </button>
+          </td>
         `;
 
         body.appendChild(row);
       });
+    }
+
+
+    async function analyzeAudit(index, button) {
+      const event = latestAuditLogs[index];
+      const panel = document.getElementById("aiAnalysis");
+      const status = document.getElementById("aiStatus");
+
+      if (!event) {
+        panel.textContent = "The selected audit event is no longer available.";
+        panel.className = "ai-analysis ai-error";
+        status.textContent = "Error";
+        return;
+      }
+
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = "Analyzing...";
+
+      panel.textContent = "Lyzr AI is analyzing the selected Zero-Trust event...";
+      panel.className = "ai-analysis ai-loading";
+      status.textContent = "Analyzing";
+
+      try {
+        const result = await requestJson("/api/lyzr/analyze", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            auditEvent: event,
+          }),
+        });
+
+        if (!result.ok || !result.data.success) {
+          throw new Error(
+            result.data.error || "AI analysis request failed"
+          );
+        }
+
+        const analysis =
+          typeof result.data.analysis === "string"
+            ? result.data.analysis
+            : JSON.stringify(result.data.analysis, null, 2);
+
+        panel.textContent = analysis;
+        panel.className = "ai-analysis";
+        status.textContent = "Analysis complete";
+
+        document
+          .querySelector(".ai-panel")
+          .scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (error) {
+        panel.textContent = `AI analysis failed: ${error.message}`;
+        panel.className = "ai-analysis ai-error";
+        status.textContent = "Failed";
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
     }
 
     async function resetDemo() {
