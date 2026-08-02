@@ -5,7 +5,7 @@ const { randomUUID } = require("crypto");
 const cors = require("cors");
 
 const app = express();
-const PORT = process.env.PORT || 3004;
+const PORT = 3004;
 
 const DATA_FILE = path.join(
   __dirname,
