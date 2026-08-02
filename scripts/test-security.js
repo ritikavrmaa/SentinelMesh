@@ -18,7 +18,9 @@ function loadIdentity(serviceName) {
     "identity.json"
   );
 
-  return JSON.parse(fs.readFileSync(file, "utf8"));
+  return JSON.parse(
+    fs.readFileSync(file, "utf8")
+  );
 }
 
 function createSigningMessage(request) {
@@ -36,19 +38,40 @@ function signRequest(request, privateKey) {
   return crypto
     .sign(
       null,
-      Buffer.from(createSigningMessage(request)),
+      Buffer.from(
+        createSigningMessage(request)
+      ),
       privateKey
     )
     .toString("base64");
 }
 
-async function createPaymentRequest(amount = 2000) {
+async function refreshOrderToken() {
+  const response = await axios.post(
+    `${ORDER_URL}/auth/token`,
+    {},
+    {
+      timeout: 5000,
+    }
+  );
+
+  return response.data;
+}
+
+async function createPaymentRequest(
+  amount = 2000
+) {
   const response = await axios.post(
     `${ORDER_URL}/create-payment-request`,
     {
-      orderId: `ORD-SEC-${Date.now()}`,
+      orderId: `ORD-SEC-${Date.now()}-${crypto
+        .randomUUID()
+        .slice(0, 8)}`,
       amount,
       currency: "INR",
+    },
+    {
+      timeout: 5000,
     }
   );
 
@@ -58,7 +81,6 @@ async function createPaymentRequest(amount = 2000) {
 async function expectError(requestPromise) {
   try {
     await requestPromise;
-
     return null;
   } catch (error) {
     return error.response?.data || {
@@ -78,31 +100,60 @@ function fail(message, details) {
 }
 
 async function runTests() {
-  console.log("\nSentinelMesh Security Test Suite\n");
-await axios.delete(
-  `${PROXY_URL}/tokens/revoked`
-);
+  console.log(
+    "\nSentinelMesh Security Test Suite\n"
+  );
 
-console.log("Previous revoked-token test data cleared\n");
+  // Clear persisted revoked-token state from earlier runs.
+  await axios.delete(
+    `${PROXY_URL}/tokens/revoked`,
+    {
+      timeout: 5000,
+    }
+  );
+
+  console.log(
+    "Previous revoked-token test data cleared\n"
+  );
+
+  // Order Service may still hold an expired JWT.
+  await refreshOrderToken();
+
+  console.log(
+    "Fresh Order Service token obtained\n"
+  );
+
   // 1. Valid request
-  const validRequest = await createPaymentRequest(2000);
+  const validRequest =
+    await createPaymentRequest(2000);
 
   const validResponse = await axios.post(
     `${PROXY_URL}/proxy/payment`,
-    validRequest
+    validRequest,
+    {
+      timeout: 5000,
+    }
   );
 
-  if (validResponse.data.decision === "ALLOW") {
+  if (
+    validResponse.data.decision === "ALLOW"
+  ) {
     pass("Valid payment request allowed");
   } else {
-    fail("Valid request was not allowed", validResponse.data);
+    fail(
+      "Valid request was not allowed",
+      validResponse.data
+    );
   }
 
   // 2. Replay attack
   const replayResult = await expectError(
     axios.post(
       `${PROXY_URL}/proxy/payment`,
-      validRequest
+      validRequest,
+      {
+        timeout: 5000,
+      }
     )
   );
 
@@ -112,7 +163,10 @@ console.log("Previous revoked-token test data cleared\n");
   ) {
     pass("Replay attack denied");
   } else {
-    fail("Replay test failed", replayResult);
+    fail(
+      "Replay test failed",
+      replayResult
+    );
   }
 
   // 3. Payload tampering
@@ -124,17 +178,25 @@ console.log("Previous revoked-token test data cleared\n");
   const tamperResult = await expectError(
     axios.post(
       `${PROXY_URL}/proxy/payment`,
-      tamperedRequest
+      tamperedRequest,
+      {
+        timeout: 5000,
+      }
     )
   );
 
   if (
     tamperResult?.decision === "DENY" &&
-    tamperResult?.reason?.includes("signature")
+    tamperResult?.reason
+      ?.toLowerCase()
+      .includes("signature")
   ) {
     pass("Tampered request denied");
   } else {
-    fail("Tamper test failed", tamperResult);
+    fail(
+      "Tamper test failed",
+      tamperResult
+    );
   }
 
   // 4. Revoked token
@@ -146,44 +208,66 @@ console.log("Previous revoked-token test data cleared\n");
     {
       tokenId: revokedRequest.tokenId,
       reason: "Automated security test",
+    },
+    {
+      timeout: 5000,
     }
   );
 
   const revokedResult = await expectError(
     axios.post(
       `${PROXY_URL}/proxy/payment`,
-      revokedRequest
+      revokedRequest,
+      {
+        timeout: 5000,
+      }
     )
   );
 
   if (
     revokedResult?.decision === "DENY" &&
-    revokedResult?.reason?.includes("revoked")
+    revokedResult?.reason
+      ?.toLowerCase()
+      .includes("revoked")
   ) {
     pass("Revoked token denied");
-    
   } else {
-    fail("Revoked-token test failed", revokedResult);
+    fail(
+      "Revoked-token test failed",
+      revokedResult
+    );
   }
+
+  // Remove test revocation so later requests can continue.
   await axios.delete(
-  `${PROXY_URL}/tokens/revoked`
-);
-
-pass("Revoked-token test state cleared");
-  
-
-pass("Order Service obtained a fresh token");
-
-  // 5. User Service -> Database lateral movement
-  const userIdentity = loadIdentity("user-service");
-
-  const userTokenResponse = await axios.post(
-    `${IDENTITY_URL}/token`,
+    `${PROXY_URL}/tokens/revoked`,
     {
-      serviceId: "user-service",
-      audience: "database-service",
+      timeout: 5000,
     }
   );
+
+  pass("Revoked-token test state cleared");
+
+  // Order Service may still be using the token revoked above.
+  await refreshOrderToken();
+
+  pass("Order Service obtained a fresh token");
+
+  // 5. User Service -> Database lateral movement
+  const userIdentity =
+    loadIdentity("user-service");
+
+  const userTokenResponse =
+    await axios.post(
+      `${IDENTITY_URL}/token`,
+      {
+        serviceId: "user-service",
+        audience: "database-service",
+      },
+      {
+        timeout: 5000,
+      }
+    );
 
   const lateralRequest = {
     sourceService: "user-service",
@@ -192,10 +276,12 @@ pass("Order Service obtained a fresh token");
     endpoint: "/transactions/store",
     timestamp: Date.now().toString(),
     nonce: crypto.randomUUID(),
-    tokenId: userTokenResponse.data.tokenId,
-    accessToken: userTokenResponse.data.token,
+    tokenId:
+      userTokenResponse.data.tokenId,
+    accessToken:
+      userTokenResponse.data.token,
     body: {
-      orderId: "ORD-LATERAL",
+      orderId: `ORD-LATERAL-${Date.now()}`,
       amount: 2000,
       currency: "INR",
       paymentStatus: "COMPLETED",
@@ -210,32 +296,48 @@ pass("Order Service obtained a fresh token");
   const lateralResult = await expectError(
     axios.post(
       `${PROXY_URL}/proxy/database`,
-      lateralRequest
+      lateralRequest,
+      {
+        timeout: 5000,
+      }
     )
   );
 
   if (
     lateralResult?.decision === "DENY" &&
-    lateralResult?.reason?.includes("Route policy")
+    lateralResult?.reason
+      ?.toLowerCase()
+      .includes("route policy")
   ) {
-    pass("User-to-database lateral movement denied");
+    pass(
+      "User-to-database lateral movement denied"
+    );
   } else {
-    fail("Lateral-movement test failed", lateralResult);
+    fail(
+      "Lateral-movement test failed",
+      lateralResult
+    );
   }
 
   // 6. High-value payment requires re-authentication
+  await refreshOrderToken();
+
   const highValueRequest =
     await createPaymentRequest(15000);
 
   const highValueResult = await expectError(
     axios.post(
       `${PROXY_URL}/proxy/payment`,
-      highValueRequest
+      highValueRequest,
+      {
+        timeout: 5000,
+      }
     )
   );
 
   if (
-    highValueResult?.decision !== "REAUTH_REQUIRED" ||
+    highValueResult?.decision !==
+      "REAUTH_REQUIRED" ||
     !highValueResult.challengeId
   ) {
     fail(
@@ -246,18 +348,29 @@ pass("Order Service obtained a fresh token");
     return;
   }
 
-  pass("High-value payment requires re-authentication");
-
-  // 7. Approve challenge
-  const approvalResponse = await axios.post(
-    `${PROXY_URL}/challenges/${highValueResult.challengeId}/approve`
+  pass(
+    "High-value payment requires re-authentication"
   );
 
+  // 7. Approve challenge
+  const approvalResponse =
+    await axios.post(
+      `${PROXY_URL}/challenges/${highValueResult.challengeId}/approve`,
+      {},
+      {
+        timeout: 10000,
+      }
+    );
+
   if (
-    approvalResponse.data.decision === "ALLOW" &&
-    approvalResponse.data.challengeStatus === "COMPLETED"
+    approvalResponse.data.decision ===
+      "ALLOW" &&
+    approvalResponse.data.challengeStatus ===
+      "COMPLETED"
   ) {
-    pass("Approved challenge completed payment");
+    pass(
+      "Approved challenge completed payment"
+    );
   } else {
     fail(
       "Challenge approval failed",
@@ -266,11 +379,18 @@ pass("Order Service obtained a fresh token");
   }
 
   // 8. Transaction persistence
-  const transactionResponse = await axios.get(
-    `${DATABASE_URL}/transactions`
-  );
+  const transactionResponse =
+    await axios.get(
+      `${DATABASE_URL}/transactions`,
+      {
+        timeout: 5000,
+      }
+    );
 
-  if (transactionResponse.data.count > 0) {
+  if (
+    Number(transactionResponse.data.count) >
+    0
+  ) {
     pass(
       `Transactions persisted: ${transactionResponse.data.count}`
     );
@@ -281,13 +401,16 @@ pass("Order Service obtained a fresh token");
     );
   }
 
-  console.log("\nSecurity test suite completed.\n");
+  console.log(
+    "\nSecurity test suite completed.\n"
+  );
 }
 
 runTests().catch((error) => {
   console.error(
     "Security test suite crashed:",
-    error.response?.data || error.message
+    error.response?.data ||
+      error.message
   );
 
   process.exit(1);
