@@ -3,3 +3,4 @@ node_modules/
 services/*/credentials/
 *.pem
 benchmark-results/
+.env
