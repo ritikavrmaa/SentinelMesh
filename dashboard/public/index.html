@@ -1814,32 +1814,27 @@ td {
 
     async function resetDemo() {
       try {
-        await Promise.all([
-          requestJson(
-            `${PROXY_URL}/audit-logs`,
-            {
-              method: "DELETE",
-            }
-          ),
+       await Promise.all([
+  requestJson(`${PROXY_URL}/audit-logs`, {
+    method: "DELETE",
+  }),
 
-          requestJson(
-            `${PROXY_URL}/tokens/revoked`,
-            {
-              method: "DELETE",
-            }
-          ),
+  requestJson(`${PROXY_URL}/tokens/revoked`, {
+    method: "DELETE",
+  }),
 
-          requestJson(
-            `${PROXY_URL}/public-key-cache`,
-            {
-              method: "DELETE",
-            }
-          ),
-        ]);
+  requestJson(`${PROXY_URL}/public-key-cache`, {
+    method: "DELETE",
+  }),
 
-        setSimulationStatus(
-          "READY · Audit logs and temporary security state cleared."
-        );
+  requestJson(`${DATABASE_URL}/transactions`, {
+    method: "DELETE",
+  }),
+]);
+
+       setSimulationStatus(
+  "READY · Audit logs, transactions and temporary security state cleared."
+);
 
         await loadDashboard(true);
       } catch (error) {

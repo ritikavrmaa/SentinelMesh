@@ -3,8 +3,9 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const cors = require("cors");
+
 const app = express();
-const PORT = 3004;
+const PORT = process.env.PORT || 3004;
 
 const DATA_FILE = path.join(
   __dirname,
@@ -41,67 +42,126 @@ function writeTransactions(transactions) {
 }
 
 app.get("/health", (req, res) => {
-  res.json({
+  const transactions = readTransactions();
+
+  return res.json({
     success: true,
     service: "database-service",
     status: "healthy",
-    storedTransactions:
-      readTransactions().length,
+    storedTransactions: transactions.length,
   });
 });
 
 app.post("/transactions/store", (req, res) => {
-  const {
-    orderId,
-    amount,
-    currency,
-    paymentId,
-    paymentStatus,
-  } = req.body || {};
+  try {
+    const {
+      orderId,
+      amount,
+      currency,
+      paymentId,
+      paymentStatus,
+    } = req.body || {};
 
-  if (!orderId || !amount || !currency) {
-    return res.status(400).json({
+    if (!orderId || !amount || !currency) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "orderId, amount and currency are required",
+      });
+    }
+
+    const numericAmount = Number(amount);
+
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be a valid positive number",
+      });
+    }
+
+    const transactions = readTransactions();
+
+    const transaction = {
+      transactionId: randomUUID(),
+      orderId,
+      amount: numericAmount,
+      currency,
+      paymentId: paymentId || null,
+      paymentStatus:
+        paymentStatus || "COMPLETED",
+      storedAt: new Date().toISOString(),
+    };
+
+    transactions.unshift(transaction);
+    writeTransactions(transactions);
+
+    return res.status(201).json({
+      success: true,
+      message: "Transaction stored successfully",
+      transaction,
+    });
+  } catch (error) {
+    console.error(
+      "Could not store transaction:",
+      error.message
+    );
+
+    return res.status(500).json({
       success: false,
-      message:
-        "orderId, amount and currency are required",
+      message: "Unable to store transaction",
     });
   }
-
-  const transactions = readTransactions();
-
-  const transaction = {
-    transactionId: randomUUID(),
-    orderId,
-    amount: Number(amount),
-    currency,
-    paymentId: paymentId || null,
-    paymentStatus:
-      paymentStatus || "COMPLETED",
-    storedAt: new Date().toISOString(),
-  };
-
-  transactions.unshift(transaction);
-  writeTransactions(transactions);
-
-  return res.status(201).json({
-    success: true,
-    message: "Transaction stored successfully",
-    transaction,
-  });
 });
 
 app.get("/transactions", (req, res) => {
-  const transactions = readTransactions();
+  try {
+    const transactions = readTransactions();
 
-  res.json({
-    success: true,
-    count: transactions.length,
-    transactions,
-  });
+    return res.json({
+      success: true,
+      count: transactions.length,
+      transactions,
+    });
+  } catch (error) {
+    console.error(
+      "Could not fetch transactions:",
+      error.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to fetch transactions",
+      count: 0,
+      transactions: [],
+    });
+  }
+});
+
+app.delete("/transactions", (req, res) => {
+  try {
+    writeTransactions([]);
+
+    return res.json({
+      success: true,
+      message: "All transactions cleared successfully",
+      count: 0,
+      transactions: [],
+    });
+  } catch (error) {
+    console.error(
+      "Could not clear transactions:",
+      error.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to clear transactions",
+    });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(
-    `Database Service running at http://localhost:${PORT}`
+    `Database Service running on port ${PORT}`
   );
 });
